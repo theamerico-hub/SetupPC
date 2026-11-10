@@ -595,16 +595,51 @@ function Initialize-Choco {
 }
 
 function Install-ProgramaChoco($Choco, $P) {
-    $cargs = @('install', $P.Choco, '-y', '--no-progress', '--limit-output')
-    if ($P.ChocoParams) { $cargs += @('--params', $P.ChocoParams) }
-    Write-Info "Instalando $($P.Nome) pelo Chocolatey..."
-    & $Choco @cargs 2>&1 | Out-Host
-    switch ($LASTEXITCODE) {
-        0       { Write-Ok "$($P.Nome) instalado (Chocolatey)."; return 'Instalado (Chocolatey)' }
-        1641    { Write-Ok "$($P.Nome) instalado (Chocolatey, requer reinício)."; $script:PrecisaReiniciar = $true; return 'Instalado (Chocolatey, reiniciar)' }
-        3010    { Write-Ok "$($P.Nome) instalado (Chocolatey, requer reinício)."; $script:PrecisaReiniciar = $true; return 'Instalado (Chocolatey, reiniciar)' }
-        default { Write-Erro "$($P.Nome) falhou também no Chocolatey (código $LASTEXITCODE)."; return "FALHOU (Chocolatey $LASTEXITCODE)" }
+    $base = @('install', $P.Choco, '-y', '--no-progress', '--limit-output')
+    if ($P.ChocoParams) { $base += @('--params', $P.ChocoParams) }
+
+    $esperou = $false
+    for ($tentativa = 1; $tentativa -le 2; $tentativa++) {
+        $cargs = @($base)
+        # 2ª tentativa: ignora a conferência do arquivo (o Google, por exemplo, troca o instalador
+        # do Chrome no mesmo endereço e o pacote do Chocolatey fica com a "impressão digital" velha)
+        if ($tentativa -eq 2) { $cargs += '--ignore-checksums' }
+        if ($tentativa -eq 1) { Write-Info "Instalando $($P.Nome) pelo Chocolatey..." }
+        else                  { Write-Info "Tentando de novo $($P.Nome) sem conferir o checksum..." }
+
+        $saida = @(& $Choco @cargs 2>&1 | ForEach-Object { "$_" })
+        $code = $LASTEXITCODE
+        $saida | Out-Host
+
+        if ($code -eq 0) {
+            $txt = 'Instalado (Chocolatey)'
+            if ($tentativa -eq 2) { $txt = 'Instalado (Chocolatey, sem checksum)' }
+            Write-Ok "$($P.Nome): $txt."
+            return $txt
+        }
+        if ($code -in 1641, 3010) {
+            Write-Ok "$($P.Nome) instalado (Chocolatey, requer reinício)."
+            $script:PrecisaReiniciar = $true
+            return 'Instalado (Chocolatey, reiniciar)'
+        }
+
+        # Mostra no log da interface o motivo da falha
+        $erros = @($saida | Where-Object { $_ -match 'ERROR|Error|error|failed|Failed|checksum|Checksum|1603|1618|denied' } | Select-Object -First 4)
+        foreach ($linha in $erros) { Write-Aviso "  Chocolatey: $($linha.Trim())" }
+
+        $ehChecksum = ($saida -join ' ') -match 'checksum'
+        if ($tentativa -eq 1 -and -not $ehChecksum) {
+            if (-not $esperou -and ($saida -join ' ') -match '1618|another installation') {
+                Write-Info 'Outra instalação está em andamento; aguardando 30 segundos...'
+                Start-Sleep -Seconds 30
+                $esperou = $true
+                $tentativa = 0; continue   # repete do jeito normal uma única vez
+            }
+            break
+        }
     }
+    Write-Erro "$($P.Nome) falhou no Chocolatey (código $code). Detalhes: $env:ProgramData\chocolatey\logs\chocolatey.log"
+    return "FALHOU (Chocolatey $code)"
 }
 
 function Install-Programas {
