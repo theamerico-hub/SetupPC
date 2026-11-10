@@ -16,7 +16,7 @@ Ou baixe a pasta e dê dois cliques em `Executar.bat` (ou `Executar (modo texto)
 
 ## O que ele faz
 
-- **Programas:** Chrome, WinRAR, AnyDesk, Acrobat Reader + opcionais, via winget
+- **Programas:** Chrome, WinRAR, AnyDesk, Acrobat Reader + opcionais, via winget (com o Chocolatey como reserva automática — funciona também no Windows 10 sem winget)
 - **Modo Gamer:** Steam, Epic Games, Discord e otimizações para jogos
 - **Office:** escolha entre Microsoft 365, 2024, 2021, 2019, 2016 ou só Word/Excel/PowerPoint (instalação oficial da Microsoft; a ativação usa a licença do cliente)
 - **Debloat:** remove apps desnecessários, telemetria, anúncios, Copilot e Widgets

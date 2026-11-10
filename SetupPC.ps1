@@ -33,39 +33,40 @@ param(
 #  CONFIGURAÇÃO  -  edite aqui
 # =====================================================================
 
-# Programas instalados pelo winget.
-# Para descobrir o ID de um programa:  winget search nome-do-programa
-# Fonte: 'winget' (padrão) ou 'msstore' (apps da Microsoft Store).
+# Programas instalados pelo winget (com o Chocolatey como reserva).
+# Id:     ID no winget       ->  descubra com:  winget search nome-do-programa
+# Choco:  nome no Chocolatey ->  descubra em:   https://community.chocolatey.org/packages
+# Fonte:  'winget' (padrão) ou 'msstore' (apps da Microsoft Store).
 # Locale: tenta instalar naquele idioma; se não existir, instala o padrão.
 $Programas = @(
-    @{ Nome = 'Google Chrome';          Id = 'Google.Chrome' }
-    @{ Nome = 'WinRAR';                 Id = 'RARLab.WinRAR'; Locale = 'pt-BR' }
-    @{ Nome = 'AnyDesk';                Id = 'AnyDesk.AnyDesk' }
-    @{ Nome = 'Adobe Acrobat Reader';   Id = 'Adobe.Acrobat.Reader.64-bit'; Locale = 'pt-BR' }
+    @{ Nome = 'Google Chrome';          Id = 'Google.Chrome';                Choco = 'googlechrome' }
+    @{ Nome = 'WinRAR';                 Id = 'RARLab.WinRAR';                Choco = 'winrar'; Locale = 'pt-BR' }
+    @{ Nome = 'AnyDesk';                Id = 'AnyDesk.AnyDesk';              Choco = 'anydesk.portable'; ChocoParams = '/INSTALL' }
+    @{ Nome = 'Adobe Acrobat Reader';   Id = 'Adobe.Acrobat.Reader.64-bit';  Choco = 'adobereader'; Locale = 'pt-BR' }
 
 )
 
 # Programas opcionais: aparecem DESMARCADOS na interface gráfica, para marcar quando quiser.
 $ProgramasOpcionais = @(
-    @{ Nome = 'Mozilla Firefox';      Id = 'Mozilla.Firefox.pt-BR' }
-    @{ Nome = '7-Zip';                Id = '7zip.7zip' }
-    @{ Nome = 'VLC';                  Id = 'VideoLAN.VLC' }
-    @{ Nome = 'Notepad++';            Id = 'Notepad++.Notepad++' }
-    @{ Nome = 'VC++ Redist x64';      Id = 'Microsoft.VCRedist.2015+.x64' }
-    @{ Nome = 'VC++ Redist x86';      Id = 'Microsoft.VCRedist.2015+.x86' }
-    @{ Nome = '.NET Desktop Runtime 8'; Id = 'Microsoft.DotNet.DesktopRuntime.8' }
-    @{ Nome = 'Java (JRE)';           Id = 'Oracle.JavaRuntimeEnvironment' }
-    @{ Nome = 'LibreOffice';          Id = 'TheDocumentFoundation.LibreOffice' }
-    @{ Nome = 'TeamViewer';           Id = 'TeamViewer.TeamViewer' }
-    @{ Nome = 'Zoom';                 Id = 'Zoom.Zoom' }
+    @{ Nome = 'Mozilla Firefox';      Id = 'Mozilla.Firefox.pt-BR';        Choco = 'firefox'; ChocoParams = '/l:pt-BR' }
+    @{ Nome = '7-Zip';                Id = '7zip.7zip';                    Choco = '7zip.install' }
+    @{ Nome = 'VLC';                  Id = 'VideoLAN.VLC';                 Choco = 'vlc' }
+    @{ Nome = 'Notepad++';            Id = 'Notepad++.Notepad++';          Choco = 'notepadplusplus.install' }
+    @{ Nome = 'VC++ Redist x64';      Id = 'Microsoft.VCRedist.2015+.x64'; Choco = 'vcredist140' }
+    @{ Nome = 'VC++ Redist x86';      Id = 'Microsoft.VCRedist.2015+.x86'; Choco = 'vcredist140' }
+    @{ Nome = '.NET Desktop Runtime 8'; Id = 'Microsoft.DotNet.DesktopRuntime.8'; Choco = 'dotnet-8.0-desktopruntime' }
+    @{ Nome = 'Java (JRE)';           Id = 'Oracle.JavaRuntimeEnvironment'; Choco = 'javaruntime' }
+    @{ Nome = 'LibreOffice';          Id = 'TheDocumentFoundation.LibreOffice'; Choco = 'libreoffice-fresh' }
+    @{ Nome = 'TeamViewer';           Id = 'TeamViewer.TeamViewer';        Choco = 'teamviewer' }
+    @{ Nome = 'Zoom';                 Id = 'Zoom.Zoom';                    Choco = 'zoom' }
     @{ Nome = 'WhatsApp';             Id = '9NKSQGP7F2NH'; Fonte = 'msstore' }
 )
 
 # Programas extras das opções "Gamer" do menu (somados à lista acima)
 $ProgramasGamer = @(
-    @{ Nome = 'Steam';                  Id = 'Valve.Steam' }
-    @{ Nome = 'Epic Games Launcher';    Id = 'EpicGames.EpicGamesLauncher' }
-    @{ Nome = 'Discord';                Id = 'Discord.Discord' }
+    @{ Nome = 'Steam';                  Id = 'Valve.Steam';                  Choco = 'steam' }
+    @{ Nome = 'Epic Games Launcher';    Id = 'EpicGames.EpicGamesLauncher';  Choco = 'epicgameslauncher' }
+    @{ Nome = 'Discord';                Id = 'Discord.Discord';              Choco = 'discord' }
 )
 
 # ---------------- Microsoft Office ----------------
@@ -110,6 +111,8 @@ $BarraTarefasEsquerda   = $false  # alinha o Iniciar à esquerda (só Win11)
 $ExplorerAbreEsteComputador = $true
 $MostrarExtensoes       = $true
 $AtualizarTudoNoFinal   = $false  # roda "winget upgrade --all" no final
+$UsarChocolatey         = $true   # se o winget não funcionar (ou falhar num programa), tenta pelo Chocolatey
+$PreferirChocolatey     = $false  # $true = usa o Chocolatey primeiro e o winget como reserva
 
 # Apps pré-instalados que serão removidos (aceita curingas *).
 # O que NÃO está aqui não é tocado (Loja, Calculadora, Fotos, Bloco de Notas, Paint, etc.).
@@ -565,14 +568,73 @@ function Get-ListaProgramas {
     return $l
 }
 
+# ---------------- Chocolatey (reserva do winget) ----------------
+function Get-ChocoPath {
+    $cmd = Get-Command choco.exe -ErrorAction SilentlyContinue
+    if ($cmd) { return $cmd.Source }
+    $exe = Join-Path $env:ProgramData 'chocolatey\bin\choco.exe'
+    if (Test-Path $exe) { return $exe }
+    return $null
+}
+
+function Initialize-Choco {
+    $choco = Get-ChocoPath
+    if ($choco) { return $choco }
+    Write-Info 'Instalando o Chocolatey (gerenciador de programas reserva)...'
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072
+        $instalador = (New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1')
+        & ([scriptblock]::Create($instalador)) *>&1 | Out-Null
+    } catch {
+        Write-Erro "Não foi possível instalar o Chocolatey: $($_.Exception.Message)"
+        return $null
+    }
+    $choco = Get-ChocoPath
+    if ($choco) { Write-Ok 'Chocolatey pronto.' } else { Write-Erro 'O Chocolatey não ficou disponível.' }
+    return $choco
+}
+
+function Install-ProgramaChoco($Choco, $P) {
+    $cargs = @('install', $P.Choco, '-y', '--no-progress', '--limit-output')
+    if ($P.ChocoParams) { $cargs += @('--params', $P.ChocoParams) }
+    Write-Info "Instalando $($P.Nome) pelo Chocolatey..."
+    & $Choco @cargs 2>&1 | Out-Host
+    switch ($LASTEXITCODE) {
+        0       { Write-Ok "$($P.Nome) instalado (Chocolatey)."; return 'Instalado (Chocolatey)' }
+        1641    { Write-Ok "$($P.Nome) instalado (Chocolatey, requer reinício)."; $script:PrecisaReiniciar = $true; return 'Instalado (Chocolatey, reiniciar)' }
+        3010    { Write-Ok "$($P.Nome) instalado (Chocolatey, requer reinício)."; $script:PrecisaReiniciar = $true; return 'Instalado (Chocolatey, reiniciar)' }
+        default { Write-Erro "$($P.Nome) falhou também no Chocolatey (código $LASTEXITCODE)."; return "FALHOU (Chocolatey $LASTEXITCODE)" }
+    }
+}
+
 function Install-Programas {
     Write-Etapa 'Instalando programas'
-    Step-Progresso 'Preparando o winget'
-    $winget = Initialize-Winget
+    Step-Progresso 'Preparando o instalador de programas'
+    $winget = $null
+    $choco  = $null
+    if ($PreferirChocolatey -and $UsarChocolatey) { $choco = Initialize-Choco }
+    if (-not $choco) { $winget = Initialize-Winget }
+    if (-not $winget -and -not $choco -and $UsarChocolatey) {
+        Write-Aviso 'winget indisponível neste PC: usando o Chocolatey.'
+        $choco = Initialize-Choco
+    }
 
     foreach ($p in @(Get-ListaProgramas)) {
         Step-Progresso "Instalando $($p.Nome)"
-        if ($winget) { $status = Install-ProgramaWinget $winget $p } else { $status = 'FALHOU (sem winget)' }
+        $status = 'FALHOU (sem instalador)'
+        if ($PreferirChocolatey -and $choco -and $p.Choco) {
+            $status = Install-ProgramaChoco $choco $p
+            if ($status -like 'FALHOU*' -and -not $winget) { $winget = Initialize-Winget }
+            if ($status -like 'FALHOU*' -and $winget) { $status = Install-ProgramaWinget $winget $p }
+        } else {
+            if ($winget) { $status = Install-ProgramaWinget $winget $p }
+            # Reserva: se o winget falhar nesse programa, tenta pelo Chocolatey
+            if ($status -like 'FALHOU*' -and $UsarChocolatey -and $p.Choco) {
+                if (-not $choco) { $choco = Initialize-Choco }
+                if ($choco) { $status = Install-ProgramaChoco $choco $p }
+            }
+        }
+        if ($status -like 'FALHOU*' -and -not $p.Choco -and -not $winget) { $status = 'FALHOU (só existe no winget)' }
         $Resultados.Add([pscustomobject]@{ Programa = $p.Nome; Status = $status })
     }
     foreach ($i in $InstaladoresLocais) {
@@ -1793,12 +1855,21 @@ function Show-DispositivosSemDriver {
 }
 
 # Instala um pacote do winget de forma silenciosa (usado pelas ferramentas de driver)
-function Install-PacoteSilencioso([string]$Id) {
+function Install-PacoteSilencioso([string]$Id, [string]$Choco) {
     $w = Get-WingetPath
     if (-not $w) { $w = Initialize-Winget }
-    if (-not $w) { return $false }
-    & $w install --id $Id --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --source winget 2>&1 | Out-Null
-    return ($LASTEXITCODE -eq 0 -or $WG_JA_INSTALADO -contains $LASTEXITCODE)
+    if ($w) {
+        & $w install --id $Id --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --source winget 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0 -or $WG_JA_INSTALADO -contains $LASTEXITCODE) { return $true }
+    }
+    if ($Choco -and $UsarChocolatey) {
+        $c = Initialize-Choco
+        if ($c) {
+            & $c install $Choco -y --no-progress --limit-output 2>&1 | Out-Null
+            return ($LASTEXITCODE -in 0, 1641, 3010)
+        }
+    }
+    return $false
 }
 
 # --- Dell: Dell Command Update ---
@@ -1807,8 +1878,8 @@ function Install-DriversDell {
     $caminhos = "$env:ProgramFiles\Dell\CommandUpdate\dcu-cli.exe", "${env:ProgramFiles(x86)}\Dell\CommandUpdate\dcu-cli.exe"
     $dcu = $caminhos | Where-Object { Test-Path $_ } | Select-Object -First 1
     if (-not $dcu) {
-        [void](Install-PacoteSilencioso 'Microsoft.DotNet.DesktopRuntime.8')   # exigido pelo DCU 5.x
-        if (-not (Install-PacoteSilencioso 'Dell.CommandUpdate.Universal')) { [void](Install-PacoteSilencioso 'Dell.CommandUpdate') }
+        [void](Install-PacoteSilencioso 'Microsoft.DotNet.DesktopRuntime.8' 'dotnet-8.0-desktopruntime')   # exigido pelo DCU 5.x
+        if (-not (Install-PacoteSilencioso 'Dell.CommandUpdate.Universal' 'dellcommandupdate-uwp')) { [void](Install-PacoteSilencioso 'Dell.CommandUpdate' 'dellcommandupdate') }
         $dcu = $caminhos | Where-Object { Test-Path $_ } | Select-Object -First 1
     }
     if (-not $dcu) { Write-Aviso 'Não foi possível instalar o Dell Command Update neste modelo.'; return 'Dell Command Update indisponível' }
@@ -1861,7 +1932,7 @@ function Install-DriversHP {
     $locais = 'C:\SWSetup', "$env:ProgramFiles\HP", "${env:ProgramFiles(x86)}\HP", "$env:LOCALAPPDATA\Microsoft\WinGet\Packages", 'C:\HPIA'
     $acha = { Get-ChildItem -Path $locais -Filter 'HPImageAssistant.exe' -Recurse -Depth 4 -ErrorAction SilentlyContinue | Select-Object -First 1 }
     $hpia = & $acha
-    if (-not $hpia) { [void](Install-PacoteSilencioso 'HP.ImageAssistant'); $hpia = & $acha }
+    if (-not $hpia) { [void](Install-PacoteSilencioso 'HP.ImageAssistant' 'hpimageassistant'); $hpia = & $acha }
     if (-not $hpia) { Write-Aviso 'Não foi possível preparar o HP Image Assistant.'; return 'HP Image Assistant indisponível' }
 
     Write-Info 'Procurando e instalando drivers da HP (pode levar vários minutos)...'
@@ -1997,7 +2068,7 @@ function Invoke-DriverBooster([bool]$Desinstalar) {
     $exe = Get-DriverBoosterExe
     if (-not $exe) {
         Write-Info 'Instalando o Driver Booster (silencioso)...'
-        [void](Install-PacoteSilencioso 'IObit.DriverBooster')
+        [void](Install-PacoteSilencioso 'IObit.DriverBooster' 'driverbooster')
         $exe = Get-DriverBoosterExe
     }
     if (-not $exe) { Write-Erro 'Não foi possível instalar o Driver Booster.'; return }
