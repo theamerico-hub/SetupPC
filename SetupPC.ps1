@@ -95,6 +95,7 @@ $OfficeMostrarJanela = $true  # mostra a janela de progresso do Office
 # Possíveis: Access, Excel, Groove, Lync, OneDrive, OneNote, Outlook, PowerPoint, Publisher, Teams, Word, Bing
 $OfficeExcluirApps = @('Groove', 'Lync', 'Teams', 'Bing')
 $OfficePularSeInstalado = $true   # se já existir algum Office no PC, NÃO instala por cima
+$AtalhosOffice          = $true   # cria atalhos do Word, Excel e PowerPoint na Área de Trabalho
 
 # Instaladores que você tem no pendrive (antivírus, drivers, sistemas próprios...).
 # Caminho relativo à pasta do script. .exe usa os argumentos informados;
@@ -202,6 +203,7 @@ $AppsXbox = @(
 
 # ---------------- Configurações do sistema ----------------
 $IconesAreaTrabalho  = $true   # Este Computador, Lixeira, Painel de Controle e pasta do usuário
+$FixarChromeBarra    = $true   # fixa o Google Chrome na barra de tarefas depois de instalar
 $ConfigurarRede      = $true   # rede privada + descoberta de rede + compartilhamento de arquivos/impressoras
 $DesativarHibernacao = $true   # apaga o hiberfil.sys e libera espaço (só desktop; notebook mantém)
 
@@ -554,6 +556,93 @@ function Select-Office {
     return $VersoesOffice[$escolha]
 }
 
+# Atalhos do Word, Excel e PowerPoint na Área de Trabalho (para todos os usuários)
+function Add-AtalhosOffice {
+    $menu   = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs'
+    $desk   = Join-Path $env:PUBLIC 'Desktop'
+    $raizes = "$env:ProgramFiles\Microsoft Office\root\Office16", "${env:ProgramFiles(x86)}\Microsoft Office\root\Office16"
+    $apps = @(
+        @{ Nome = 'Word';       Exe = 'WINWORD.EXE' }
+        @{ Nome = 'Excel';      Exe = 'EXCEL.EXE' }
+        @{ Nome = 'PowerPoint'; Exe = 'POWERPNT.EXE' }
+    )
+    $criados = @()
+    foreach ($a in $apps) {
+        $destino = Join-Path $desk "$($a.Nome).lnk"
+        $doMenu  = Join-Path $menu "$($a.Nome).lnk"
+        try {
+            if (Test-Path $doMenu) {
+                # Copia o atalho que o próprio Office criou no Menu Iniciar
+                Copy-Item $doMenu $destino -Force -ErrorAction Stop
+                $criados += $a.Nome
+            } else {
+                $exe = $raizes | ForEach-Object { Join-Path $_ $a.Exe } | Where-Object { Test-Path $_ } | Select-Object -First 1
+                if ($exe) {
+                    $sh = New-Object -ComObject WScript.Shell
+                    $lnk = $sh.CreateShortcut($destino)
+                    $lnk.TargetPath = $exe
+                    $lnk.WorkingDirectory = Split-Path $exe
+                    $lnk.Save()
+                    $criados += $a.Nome
+                }
+            }
+        } catch { Write-Aviso "Não foi possível criar o atalho do $($a.Nome): $($_.Exception.Message)" }
+    }
+    if ($criados.Count -gt 0) {
+        Write-Ok "Atalhos na Área de Trabalho: $($criados -join ', ')."
+        Add-Acao "Atalhos do $($criados -join ', ') criados na Área de Trabalho"
+    }
+}
+
+# Fixa o Chrome na barra de tarefas pelo método oficial (layout da barra de tarefas).
+# PinListPlacement="Append" mantém os ícones que já estão lá e só acrescenta o Chrome.
+function Set-ChromeBarraTarefas {
+    $lnk = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Google Chrome.lnk'
+    if (-not (Test-Path $lnk)) { Write-Aviso 'Atalho do Chrome não encontrado; não foi possível fixar na barra de tarefas.'; return }
+
+    $xml = @'
+<?xml version="1.0" encoding="utf-8"?>
+<LayoutModificationTemplate
+    xmlns="http://schemas.microsoft.com/Start/2014/LayoutModification"
+    xmlns:defaultlayout="http://schemas.microsoft.com/Start/2014/FullDefaultLayout"
+    xmlns:start="http://schemas.microsoft.com/Start/2014/StartLayout"
+    xmlns:taskbar="http://schemas.microsoft.com/Start/2014/TaskbarLayout"
+    Version="1">
+  <CustomTaskbarLayoutCollection PinListPlacement="Append">
+    <defaultlayout:TaskbarLayout>
+      <taskbar:TaskbarPinList>
+        <taskbar:DesktopApp DesktopApplicationLinkPath="%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs\Google Chrome.lnk" />
+      </taskbar:TaskbarPinList>
+    </defaultlayout:TaskbarLayout>
+  </CustomTaskbarLayoutCollection>
+</LayoutModificationTemplate>
+'@
+    try {
+        # 1) Usuário atual: política de layout da barra de tarefas
+        $pasta = Join-Path $env:ProgramData 'SetupPC'
+        New-Item -ItemType Directory -Path $pasta -Force | Out-Null
+        $arq = Join-Path $pasta 'BarraDeTarefas.xml'
+        [IO.File]::WriteAllText($arq, $xml, (New-Object System.Text.UTF8Encoding($false)))
+        $pol = 'HKCU:\Software\Policies\Microsoft\Windows\Explorer'
+        Set-Reg $pol 'StartLayoutFile' $arq 'ExpandString'
+        Set-Reg $pol 'LockedStartLayout' 1
+
+        # 2) Novos usuários: layout padrão do perfil Default
+        $shellDefault = "$env:SystemDrive\Users\Default\AppData\Local\Microsoft\Windows\Shell"
+        New-Item -ItemType Directory -Path $shellDefault -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $shellDefault 'LayoutModification.xml'), $xml, (New-Object System.Text.UTF8Encoding($false)))
+
+        # Reinicia o Explorer para aplicar
+        Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+        Start-Sleep -Seconds 2
+        if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }
+        Write-Ok 'Google Chrome fixado na barra de tarefas.'
+        Add-Acao 'Google Chrome fixado na barra de tarefas'
+    } catch {
+        Write-Aviso "Não foi possível fixar o Chrome na barra de tarefas: $($_.Exception.Message)"
+    }
+}
+
 function Install-Office($V) {
     if ($OfficePularSeInstalado) {
         $existente = @(Get-OfficeInstalado)
@@ -616,6 +705,7 @@ $linhasExcluir
     $proc = Start-Process $setup -ArgumentList "/configure `"$xmlPath`"" -Wait -PassThru
     if ($proc.ExitCode -eq 0) {
         Write-Ok "$($V.Nome) instalado."
+        if ($AtalhosOffice) { Add-AtalhosOffice }
         return 'Instalado'
     }
     Write-Erro "Instalação do Office terminou com código $($proc.ExitCode). Logs da ODT em: $env:TEMP"
@@ -717,6 +807,7 @@ function Install-Programas {
         $choco = Initialize-Choco
     }
 
+    $chromeOk = $false
     foreach ($p in @(Get-ListaProgramas)) {
         Step-Progresso "Instalando $($p.Nome)"
         $status = 'FALHOU (sem instalador)'
@@ -734,7 +825,9 @@ function Install-Programas {
         }
         if ($status -like 'FALHOU*' -and -not $p.Choco -and -not $winget) { $status = 'FALHOU (só existe no winget)' }
         $Resultados.Add([pscustomobject]@{ Programa = $p.Nome; Status = $status })
+        if ($p.Id -eq 'Google.Chrome' -and $FixarChromeBarra -and $status -notlike 'FALHOU*') { $chromeOk = $true }
     }
+    if ($chromeOk) { Set-ChromeBarraTarefas }
     foreach ($i in $InstaladoresLocais) {
         Step-Progresso "Instalando $($i.Nome)"
         $status = Install-InstaladorLocal $i
@@ -2387,6 +2480,8 @@ $XamlPrincipal = @'
                   <CheckBox x:Name="chkIcones" Content="Ícones na Área de Trabalho (Este Computador, Lixeira...)"/>
                   <CheckBox x:Name="chkRede" Content="Rede privada, descoberta de rede e impressoras"/>
                   <CheckBox x:Name="chkHibernacao" Content="Desativar a hibernação (desktops)"/>
+                  <CheckBox x:Name="chkFixarChrome" Content="Fixar o Google Chrome na barra de tarefas"/>
+                  <CheckBox x:Name="chkAtalhosOffice" Content="Atalhos do Word, Excel e PowerPoint na Área de Trabalho"/>
                 </StackPanel>
               </Border>
               <Border Style="{StaticResource Card}">
@@ -2608,6 +2703,8 @@ $GuiScript = {
         $c.chkIcones.IsChecked     = $pd.Icones
         $c.chkRede.IsChecked       = $pd.Rede
         $c.chkHibernacao.IsChecked = $pd.Hibernacao
+        $c.chkFixarChrome.IsChecked = $pd.FixarChrome
+        $c.chkAtalhosOffice.IsChecked = $pd.AtalhosOffice
         $c.chkRelatorio.IsChecked  = $pd.Relatorio
         $c.chkDrivers.IsChecked    = $pd.Drivers
         $c.txtModelo.Text = "Detectado: $($d.Modelo)`n$($d.FerramentaDrivers)"
@@ -2660,6 +2757,8 @@ $GuiScript = {
                 Icones        = [bool]$c.chkIcones.IsChecked
                 Rede          = [bool]$c.chkRede.IsChecked
                 Hibernacao    = [bool]$c.chkHibernacao.IsChecked
+                FixarChrome   = [bool]$c.chkFixarChrome.IsChecked
+                AtalhosOffice = [bool]$c.chkAtalhosOffice.IsChecked
                 Otimizar      = [bool]$c.chkOtimizar.IsChecked
                 PlanoNotebook = [bool]$c.chkPlanoNotebook.IsChecked
                 DesativarWU   = [bool]$c.chkWU.IsChecked
@@ -2800,6 +2899,8 @@ function Set-ConfigDaGui($Cfg) {
     $script:IconesAreaTrabalho  = [bool]$Cfg.Icones
     $script:ConfigurarRede      = [bool]$Cfg.Rede
     $script:DesativarHibernacao = [bool]$Cfg.Hibernacao
+    $script:FixarChromeBarra    = [bool]$Cfg.FixarChrome
+    $script:AtalhosOffice       = [bool]$Cfg.AtalhosOffice
     $script:Otimizar            = [switch]$Cfg.Otimizar
     if ($Cfg.PlanoNotebook) { $script:PlanoNotebook = 'S' } else { $script:PlanoNotebook = 'N' }
     $script:DesativarWindowsUpdate = [switch]$Cfg.DesativarWU
@@ -2883,7 +2984,7 @@ function Start-Gui {
         Padroes      = @{
             RemoverXbox = $RemoverXbox; RemoverOneDrive = $RemoverOneDrive; Icones = $IconesAreaTrabalho
             Rede = $ConfigurarRede; Hibernacao = $DesativarHibernacao; Relatorio = $GerarRelatorioEntrega
-            Drivers = $InstalarDrivers
+            Drivers = $InstalarDrivers; FixarChrome = $FixarChromeBarra; AtalhosOffice = $AtalhosOffice
         }
     }
 
