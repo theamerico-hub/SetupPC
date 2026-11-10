@@ -20,6 +20,7 @@ Ou baixe a pasta e dê dois cliques em `Executar.bat` (ou `Executar (modo texto)
 - **Modo Gamer:** Steam, Epic Games, Discord e otimizações para jogos
 - **Office:** escolha entre Microsoft 365, 2024, 2021, 2019, 2016 ou só Word/Excel/PowerPoint (instalação oficial da Microsoft; a ativação usa a licença do cliente)
 - **Debloat:** remove apps desnecessários, telemetria, anúncios, Copilot e Widgets
+- **Drivers:** detecta o modelo e usa a ferramenta oficial do fabricante (Dell Command Update, catálogo Lenovo, HP Image Assistant) + Windows Update; Driver Booster opcional para revisão manual
 - **Configurações:** ícones na Área de Trabalho, rede privada com compartilhamento, hibernação
 - **Ferramentas:** relatório do PC, limpeza de disco, otimização avançada (reversível), Windows Update, ativação com chave
 - **Relatório de entrega** em HTML para o cliente

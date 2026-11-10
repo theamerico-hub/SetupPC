@@ -205,6 +205,7 @@ $LimpezaProfunda = $true       # inclui limpeza de componentes antigos do Window
 
 # ---------------- Relatórios ----------------
 $GerarRelatorioEntrega         = $true   # relatório HTML do serviço ao fim da instalação
+$InstalarDrivers               = $true   # drivers do fabricante (Dell/Lenovo/HP) + Windows Update na instalação
 $CopiarEntregaParaAreaTrabalho = $true   # deixa uma cópia na Área de Trabalho para o cliente
 $NomeTecnico    = 'Danilo Américo'
 $ContatoTecnico = ''                     # ex.: 'WhatsApp (81) 9xxxx-xxxx' - aparece nos relatórios
@@ -294,6 +295,10 @@ function Invoke-PerguntaGui([string]$Tipo, [string]$Texto) {
 function Confirm-Usuario([string]$Texto) {
     if ($script:Sync) { return [bool](Invoke-PerguntaGui 'SimNao' $Texto) }
     return ((Read-Host "   $Texto (S/N)") -match '^[sS]')
+}
+function Show-AvisoUsuario([string]$Texto) {
+    if ($script:Sync) { [void](Invoke-PerguntaGui 'Aviso' $Texto); return }
+    [void](Read-Host "   $($Texto -replace "`n", ' ') (Enter para continuar)")
 }
 function Read-TextoUsuario([string]$Texto) {
     if ($script:Sync) { return [string](Invoke-PerguntaGui 'Texto' $Texto) }
@@ -789,11 +794,12 @@ function Show-MenuPrincipal {
     Write-Host '   [7]  Ativação              (Windows e Office com chave)'           -ForegroundColor White
     Write-Host '   [8]  Relatório do PC       (hardware, saúde do disco e bateria)'   -ForegroundColor White
     Write-Host '   [9]  Limpeza               (temporários, cache e arquivos antigos)' -ForegroundColor White
+    Write-Host '   [10] Drivers               (verificar, instalar, Driver Booster)'  -ForegroundColor White
     Write-Host '   [0]  Sair'                                                         -ForegroundColor White
     Write-Host ''
     Write-Host "   Jogos: $(($ProgramasGamer | ForEach-Object { $_.Nome }) -join ', ')" -ForegroundColor DarkGray
     Write-Host ''
-    do { $op = (Read-Host '   Escolha uma opção').Trim() } until ($op -in '0', '1', '2', '3', '4', '5', '6', '7', '8', '9')
+    do { $op = (Read-Host '   Escolha uma opção').Trim() } until ($op -in '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10')
     return $op
 }
 
@@ -1541,6 +1547,8 @@ function Get-InfoPC {
     } catch {}
     $av = (Get-CimInstance -Namespace 'root/SecurityCenter2' -ClassName AntiVirusProduct -ErrorAction SilentlyContinue |
            ForEach-Object { $_.displayName }) -join ', '
+    $info['Dispositivos sem driver ou com erro'] = @(Get-DispositivosSemDriver)
+
     $info['Segurança'] = [ordered]@{
         'TPM'                       = $tpmTxt
         'Secure Boot'               = $sboot
@@ -1693,6 +1701,7 @@ function New-RelatorioEntrega([TimeSpan]$Duracao) {
         [pscustomobject]@{ 'Programa' = $_.Programa; 'Status' = $_.Status }
     })
     $secoes['O que foi feito'] = @($script:Acoes)
+    if ($script:ResultadoDrivers) { $secoes['Drivers'] = @($script:ResultadoDrivers) }
 
     $info = Get-InfoPC
     foreach ($k in $info.Keys) { $secoes[$k] = $info[$k] }
@@ -1704,6 +1713,9 @@ function New-RelatorioEntrega([TimeSpan]$Duracao) {
     }
     if ((Get-ItemProperty "$WU_POL\AU" -ErrorAction SilentlyContinue).NoAutoUpdate -eq 1) {
         $recs.Add('O Windows Update está desativado: o computador não recebe atualizações de segurança automaticamente.')
+    }
+    if (@($script:DispositivosPendentes).Count -gt 0) {
+        $recs.Add('Alguns dispositivos ficaram sem driver: veja a lista "Dispositivos sem driver ou com erro" neste relatório.')
     }
     $recs.Add('Mantenha cópias dos seus arquivos importantes em um HD externo ou na nuvem.')
     $secoes['Recomendações'] = @($recs)
@@ -1723,6 +1735,268 @@ function New-RelatorioEntrega([TimeSpan]$Duracao) {
 }
 
 # ---------------------------------------------------------------------
+#  10b. Drivers
+# ---------------------------------------------------------------------
+# Fabricante e modelo (o mesmo "Modelo do sistema" das Informações do Sistema)
+function Get-Fabricante {
+    $cs  = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+    $fab = ("$($cs.Manufacturer)").Trim()
+    $mod = ("$($cs.Model)").Trim()
+    if ($fab -match 'LENOVO') {
+        # Na Lenovo o nome comercial (ex.: ThinkPad T14) fica em outro campo
+        $nome = (Get-CimInstance Win32_ComputerSystemProduct -ErrorAction SilentlyContinue).Version
+        if ($nome) { $mod = "$nome ($mod)" }
+    }
+    $marca = 'Outra'
+    if     ($fab -match 'Dell|Alienware')          { $marca = 'Dell' }
+    elseif ($fab -match 'Lenovo')                  { $marca = 'Lenovo' }
+    elseif ($fab -match '^HP\b|Hewlett')           { $marca = 'HP' }
+    elseif ($fab -match 'To be filled|System manufacturer|Default string|^$') {
+        # PC montado: mostra a placa-mãe
+        $mb = Get-CimInstance Win32_BaseBoard -ErrorAction SilentlyContinue
+        $fab = 'PC montado'
+        $mod = ("Placa-mãe $($mb.Manufacturer) $($mb.Product)").Trim()
+    }
+    return @{ Marca = $marca; Fabricante = $fab; Modelo = $mod }
+}
+
+# Dispositivos com ponto de exclamação no Gerenciador de Dispositivos
+function Get-DispositivosSemDriver {
+    $problemas = @{ 1 = 'Mal configurado'; 10 = 'Não consegue iniciar'; 18 = 'Precisa reinstalar o driver'; 28 = 'Sem driver'; 31 = 'Driver com erro'; 39 = 'Driver corrompido'; 43 = 'Parou de responder' }
+    return @(Get-CimInstance Win32_PnPEntity -Filter 'ConfigManagerErrorCode <> 0' -ErrorAction SilentlyContinue |
+        Where-Object { $_.ConfigManagerErrorCode -notin 22, 45 } |   # 22 = desativado de propósito, 45 = desconectado
+        ForEach-Object {
+            $nome = $_.Name; if (-not $nome) { $nome = 'Dispositivo desconhecido' }
+            $prob = $problemas[[int]$_.ConfigManagerErrorCode]; if (-not $prob) { $prob = "Código $($_.ConfigManagerErrorCode)" }
+            [pscustomobject]@{ 'Dispositivo' = $nome; 'Problema' = $prob }
+        })
+}
+
+function Show-DispositivosSemDriver {
+    Write-Etapa 'Verificação de drivers'
+    $f = Get-Fabricante
+    Write-Info "Computador: $($f.Fabricante) $($f.Modelo)"
+    switch ($f.Marca) {
+        'Dell'   { Write-Info 'Ferramenta do fabricante disponível: Dell Command Update' }
+        'Lenovo' { Write-Info 'Ferramenta do fabricante disponível: catálogo oficial da Lenovo (LSUClient)' }
+        'HP'     { Write-Info 'Ferramenta do fabricante disponível: HP Image Assistant' }
+        default  { Write-Info 'Sem ferramenta automática do fabricante: os drivers virão do Windows Update.' }
+    }
+    $sem = @(Get-DispositivosSemDriver)
+    if ($sem.Count -eq 0) {
+        Write-Ok 'Nenhum dispositivo sem driver ou com erro.'
+    } else {
+        Write-Aviso "$($sem.Count) dispositivo(s) com problema:"
+        foreach ($d in $sem) { Write-Host "         - $($d.Dispositivo)  ($($d.Problema))" -ForegroundColor Yellow }
+    }
+    return $sem
+}
+
+# Instala um pacote do winget de forma silenciosa (usado pelas ferramentas de driver)
+function Install-PacoteSilencioso([string]$Id) {
+    $w = Get-WingetPath
+    if (-not $w) { $w = Initialize-Winget }
+    if (-not $w) { return $false }
+    & $w install --id $Id --exact --silent --accept-package-agreements --accept-source-agreements --disable-interactivity --source winget 2>&1 | Out-Null
+    return ($LASTEXITCODE -eq 0 -or $WG_JA_INSTALADO -contains $LASTEXITCODE)
+}
+
+# --- Dell: Dell Command Update ---
+function Install-DriversDell {
+    Write-Info 'Preparando o Dell Command Update...'
+    $caminhos = "$env:ProgramFiles\Dell\CommandUpdate\dcu-cli.exe", "${env:ProgramFiles(x86)}\Dell\CommandUpdate\dcu-cli.exe"
+    $dcu = $caminhos | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $dcu) {
+        [void](Install-PacoteSilencioso 'Microsoft.DotNet.DesktopRuntime.8')   # exigido pelo DCU 5.x
+        if (-not (Install-PacoteSilencioso 'Dell.CommandUpdate.Universal')) { [void](Install-PacoteSilencioso 'Dell.CommandUpdate') }
+        $dcu = $caminhos | Where-Object { Test-Path $_ } | Select-Object -First 1
+    }
+    if (-not $dcu) { Write-Aviso 'Não foi possível instalar o Dell Command Update neste modelo.'; return 'Dell Command Update indisponível' }
+
+    Write-Info 'Procurando e instalando drivers da Dell (pode levar vários minutos)...'
+    $log = Join-Path $env:TEMP 'SetupPC_dcu.log'
+    $p = Start-Process $dcu -ArgumentList "/applyUpdates -updateType=driver -silent -reboot=disable -outputLog=`"$log`"" -Wait -PassThru -WindowStyle Hidden
+    switch ($p.ExitCode) {
+        0       { Write-Ok 'Drivers da Dell instalados.'; return 'Drivers instalados' }
+        1       { Write-Ok 'Drivers da Dell instalados (requer reinício).'; $script:PrecisaReiniciar = $true; return 'Drivers instalados (reiniciar)' }
+        5       { Write-Ok 'Drivers da Dell instalados (requer reinício).'; $script:PrecisaReiniciar = $true; return 'Drivers instalados (reiniciar)' }
+        500     { Write-Ok 'Dell: todos os drivers já estão atualizados.'; return 'Já atualizado' }
+        default { Write-Aviso "Dell Command Update terminou com código $($p.ExitCode)."; return "Atenção (código $($p.ExitCode))" }
+    }
+}
+
+# --- Lenovo: catálogo oficial via módulo LSUClient ---
+function Install-DriversLenovo {
+    Write-Info 'Preparando o catálogo de drivers da Lenovo (LSUClient)...'
+    try {
+        if (-not (Get-Module -ListAvailable -Name LSUClient)) {
+            Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope AllUsers -ErrorAction Stop | Out-Null
+            Install-Module -Name LSUClient -Force -Scope AllUsers -ErrorAction Stop
+        }
+        Import-Module LSUClient -ErrorAction Stop
+        # Só drivers que instalam sozinhos; BIOS/firmware ficam de fora por segurança
+        $ups = @(Get-LSUpdate -ErrorAction Stop | Where-Object {
+            $_.Installer.Unattended -and "$($_.Type)" -notmatch 'BIOS|Firmware' -and "$($_.Category)" -notmatch 'BIOS|UEFI|Firmware' -and "$($_.Title)" -notmatch 'BIOS|UEFI'
+        })
+        if ($ups.Count -eq 0) { Write-Ok 'Lenovo: todos os drivers já estão atualizados.'; return 'Já atualizado' }
+        Write-Info "Baixando $($ups.Count) atualização(ões) da Lenovo..."
+        $ups | Save-LSUpdate -ErrorAction SilentlyContinue | Out-Null
+        $i = 0
+        foreach ($u in $ups) {
+            $i++
+            Write-Info "  [$i/$($ups.Count)] $($u.Title)"
+            Install-LSUpdate -Package $u -ErrorAction SilentlyContinue | Out-Null
+        }
+        Write-Ok "Lenovo: $($ups.Count) driver(s) instalado(s)."
+        return "$($ups.Count) driver(s) instalado(s)"
+    } catch {
+        Write-Aviso "Catálogo da Lenovo indisponível: $($_.Exception.Message)"
+        return 'Catálogo Lenovo indisponível'
+    }
+}
+
+# --- HP: HP Image Assistant ---
+function Install-DriversHP {
+    Write-Info 'Preparando o HP Image Assistant...'
+    $locais = 'C:\SWSetup', "$env:ProgramFiles\HP", "${env:ProgramFiles(x86)}\HP", "$env:LOCALAPPDATA\Microsoft\WinGet\Packages", 'C:\HPIA'
+    $acha = { Get-ChildItem -Path $locais -Filter 'HPImageAssistant.exe' -Recurse -Depth 4 -ErrorAction SilentlyContinue | Select-Object -First 1 }
+    $hpia = & $acha
+    if (-not $hpia) { [void](Install-PacoteSilencioso 'HP.ImageAssistant'); $hpia = & $acha }
+    if (-not $hpia) { Write-Aviso 'Não foi possível preparar o HP Image Assistant.'; return 'HP Image Assistant indisponível' }
+
+    Write-Info 'Procurando e instalando drivers da HP (pode levar vários minutos)...'
+    $base = 'C:\SetupPC_HPIA'   # caminho sem espaços (o HPIA tem problemas com espaços)
+    New-Item -ItemType Directory -Path "$base\Relatorio", "$base\Softpaqs" -Force | Out-Null
+    $p = Start-Process $hpia.FullName -ArgumentList "/Operation:Analyze /Category:Drivers /Selection:All /Action:Install /Silent /AutoCleanup /ReportFolder:$base\Relatorio /SoftpaqDownloadFolder:$base\Softpaqs" -Wait -PassThru
+    Remove-Item "$base\Softpaqs" -Recurse -Force -ErrorAction SilentlyContinue
+    switch ($p.ExitCode) {
+        0       { Write-Ok 'Drivers da HP instalados.'; return 'Drivers instalados' }
+        3010    { Write-Ok 'Drivers da HP instalados (requer reinício).'; $script:PrecisaReiniciar = $true; return 'Drivers instalados (reiniciar)' }
+        256     { Write-Ok 'HP: nenhum driver novo recomendado.'; return 'Já atualizado' }
+        257     { Write-Ok 'HP: nenhum driver novo recomendado.'; return 'Já atualizado' }
+        default { Write-Aviso "HP Image Assistant terminou com código $($p.ExitCode)."; return "Atenção (código $($p.ExitCode))" }
+    }
+}
+
+# --- Qualquer marca: drivers pelo Windows Update ---
+function Install-DriversWindowsUpdate {
+    Write-Info 'Procurando drivers no Windows Update...'
+    try {
+        $sessao = New-Object -ComObject Microsoft.Update.Session
+        $sessao.ClientApplicationID = 'SetupPC'
+        $busca  = $sessao.CreateUpdateSearcher()
+        $res    = $busca.Search("IsInstalled=0 and Type='Driver' and IsHidden=0")
+        if ($res.Updates.Count -eq 0) { Write-Ok 'Windows Update: nenhum driver pendente.'; return 'Nenhum driver pendente' }
+
+        $lista = New-Object -ComObject Microsoft.Update.UpdateColl
+        foreach ($u in $res.Updates) {
+            if (-not $u.EulaAccepted) { $u.AcceptEula() }
+            Write-Info "  - $($u.Title)"
+            [void]$lista.Add($u)
+        }
+        Write-Info "Baixando $($lista.Count) driver(s)..."
+        $down = $sessao.CreateUpdateDownloader(); $down.Updates = $lista; [void]$down.Download()
+        Write-Info 'Instalando...'
+        $inst = $sessao.CreateUpdateInstaller(); $inst.Updates = $lista
+        $r = $inst.Install()
+        $ok = 0
+        for ($i = 0; $i -lt $lista.Count; $i++) { if ($r.GetUpdateResult($i).ResultCode -in 2, 3) { $ok++ } }
+        if ($r.RebootRequired) { $script:PrecisaReiniciar = $true }
+        Write-Ok "Windows Update: $ok de $($lista.Count) driver(s) instalado(s)."
+        return "$ok de $($lista.Count) driver(s) instalado(s)"
+    } catch {
+        Write-Aviso "Não foi possível usar o Windows Update: $($_.Exception.Message)"
+        return 'Windows Update indisponível'
+    }
+}
+
+# Fluxo completo: fabricante + Windows Update + verificação final
+function Invoke-Drivers {
+    Write-Etapa 'Drivers'
+    $f = Get-Fabricante
+    Write-Info "Computador: $($f.Fabricante) $($f.Modelo)"
+    $antes = @(Get-DispositivosSemDriver)
+    Write-Info "Dispositivos sem driver ou com erro antes: $($antes.Count)"
+
+    $script:ResultadoDrivers = New-Object System.Collections.Generic.List[object]
+    switch ($f.Marca) {
+        'Dell'   { $script:ResultadoDrivers.Add([pscustomobject]@{ 'Origem' = 'Dell Command Update'; 'Status' = (Install-DriversDell) }) }
+        'Lenovo' { $script:ResultadoDrivers.Add([pscustomobject]@{ 'Origem' = 'Catálogo Lenovo';     'Status' = (Install-DriversLenovo) }) }
+        'HP'     { $script:ResultadoDrivers.Add([pscustomobject]@{ 'Origem' = 'HP Image Assistant';  'Status' = (Install-DriversHP) }) }
+    }
+    $script:ResultadoDrivers.Add([pscustomobject]@{ 'Origem' = 'Windows Update'; 'Status' = (Install-DriversWindowsUpdate) })
+
+    $depois = @(Get-DispositivosSemDriver)
+    $script:DispositivosPendentes = $depois
+    if ($depois.Count -eq 0) {
+        Write-Ok 'Todos os dispositivos estão com driver.'
+        Add-Acao 'Drivers instalados e atualizados (todos os dispositivos com driver)'
+    } else {
+        Write-Aviso "$($depois.Count) dispositivo(s) ainda sem driver ou com erro. Tente o Driver Booster em Ferramentas."
+        foreach ($d in $depois) { Write-Host "         - $($d.Dispositivo)  ($($d.Problema))" -ForegroundColor Yellow }
+        Add-Acao "Drivers instalados e atualizados ($($depois.Count) dispositivo(s) ainda com pendência)"
+    }
+}
+
+# --- Driver Booster (manual: você revisa e clica em Atualizar) ---
+function Get-DriverBoosterExe {
+    return Get-ChildItem -Path "${env:ProgramFiles(x86)}\IObit\Driver Booster", "$env:ProgramFiles\IObit\Driver Booster" -Filter 'DriverBooster.exe' -Recurse -ErrorAction SilentlyContinue |
+           Sort-Object FullName -Descending | Select-Object -First 1
+}
+
+function Remove-DriverBooster {
+    Write-Info 'Desinstalando o Driver Booster...'
+    Get-Process -Name 'DriverBooster', 'DBDownloader', 'Scheduler' -ErrorAction SilentlyContinue |
+        Where-Object { $_.Path -like '*IObit*' } | Stop-Process -Force -ErrorAction SilentlyContinue
+    $w = Get-WingetPath
+    if ($w) { & $w uninstall --id IObit.DriverBooster --exact --silent --accept-source-agreements --disable-interactivity 2>&1 | Out-Null }
+    $unins = Get-ChildItem -Path "${env:ProgramFiles(x86)}\IObit\Driver Booster", "$env:ProgramFiles\IObit\Driver Booster" -Filter 'unins000.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($unins) { Start-Process $unins.FullName -ArgumentList '/VERYSILENT /NORESTART' -Wait -ErrorAction SilentlyContinue }
+    if (Get-DriverBoosterExe) { Write-Aviso 'O Driver Booster não foi removido totalmente; desinstale pelo Painel de Controle.' }
+    else { Write-Ok 'Driver Booster desinstalado.' }
+}
+
+function Invoke-DriverBooster([bool]$Desinstalar) {
+    Write-Etapa 'Driver Booster'
+    $exe = Get-DriverBoosterExe
+    if (-not $exe) {
+        Write-Info 'Instalando o Driver Booster (silencioso)...'
+        [void](Install-PacoteSilencioso 'IObit.DriverBooster')
+        $exe = Get-DriverBoosterExe
+    }
+    if (-not $exe) { Write-Erro 'Não foi possível instalar o Driver Booster.'; return }
+
+    Write-Info 'Abrindo o Driver Booster. Ele faz a busca sozinho; confira a lista e clique em "Atualizar agora".'
+    Start-Process $exe.FullName
+    Show-AvisoUsuario "O Driver Booster foi aberto.`n`n1. Espere a busca terminar.`n2. Confira a lista e clique em ""Atualizar agora"".`n3. Quando os drivers terminarem de instalar, volte aqui e clique em OK."
+    Add-Acao 'Drivers revisados com o Driver Booster'
+    if ($Desinstalar) { Remove-DriverBooster }
+    $sem = @(Get-DispositivosSemDriver)
+    if ($sem.Count -eq 0) { Write-Ok 'Todos os dispositivos estão com driver.' }
+    else { Write-Aviso "$($sem.Count) dispositivo(s) ainda com pendência." }
+}
+
+function Invoke-MenuDrivers {
+    do {
+        Write-Etapa 'Drivers'
+        Write-Host '   [1]  Verificar (lista dispositivos sem driver)'
+        Write-Host '   [2]  Instalar drivers (fabricante + Windows Update)'
+        Write-Host '   [3]  Abrir o Driver Booster (e desinstalar ao terminar)'
+        Write-Host '   [4]  Abrir o Driver Booster (e manter instalado)'
+        Write-Host '   [0]  Voltar'
+        Write-Host ''
+        $op = (Read-Host '   Escolha uma opção').Trim()
+        switch ($op) {
+            '1' { [void](Show-DispositivosSemDriver) }
+            '2' { Invoke-Drivers }
+            '3' { Invoke-DriverBooster $true }
+            '4' { Invoke-DriverBooster $false }
+        }
+        if ($op -ne '0') { Write-Host ''; Read-Host '   Enter para continuar' | Out-Null }
+    } until ($op -eq '0')
+}
+
+# ---------------------------------------------------------------------
 #  11. Instalação (usada pelo modo texto e pela interface gráfica)
 # ---------------------------------------------------------------------
 function Invoke-Instalacao {
@@ -1730,6 +2004,8 @@ function Invoke-Instalacao {
     $Resultados.Clear()
     $script:Acoes.Clear()
     $script:ArquivoEntrega = $null
+    $script:ResultadoDrivers = $null
+    $script:DispositivosPendentes = $null
 
     # Conta as etapas para a barra de progresso
     $total = 1   # configurações do sistema
@@ -1738,6 +2014,7 @@ function Invoke-Instalacao {
         $total += 1 + @(Get-ListaProgramas).Count + @($InstaladoresLocais).Count
         if ($script:OfficeEscolhido) { $total++ }
     }
+    if ($InstalarDrivers)        { $total++ }
     if (-not $SemDebloat)        { $total++ }
     if ($Otimizar)               { $total++ }
     if ($DesativarWindowsUpdate) { $total++ }
@@ -1747,6 +2024,7 @@ function Invoke-Instalacao {
 
     if (-not $SemPontoRestauracao) { Step-Progresso 'Criando ponto de restauração'; New-PontoRestauracao }
     if (-not $SemProgramas)        { Install-Programas }
+    if ($InstalarDrivers)          { Step-Progresso 'Instalando drivers (fabricante + Windows Update)'; Invoke-Drivers }
     Step-Progresso 'Configurações do sistema'
     Invoke-ConfiguracoesSistema
     if (-not $SemDebloat)          { Step-Progresso 'Debloat: removendo apps e desativando telemetria'; Invoke-Debloat }
@@ -1932,7 +2210,8 @@ $XamlPrincipal = @'
               </Border>
               <Border Style="{StaticResource Card}">
                 <StackPanel>
-                  <TextBlock Style="{StaticResource Titulo}" Text="AO TERMINAR"/>
+                  <TextBlock Style="{StaticResource Titulo}" Text="DRIVERS E RELATÓRIO"/>
+                  <CheckBox x:Name="chkDrivers" Content="Instalar drivers (fabricante + Windows Update)"/>
                   <CheckBox x:Name="chkRelatorio" Content="Gerar relatório de entrega para o cliente"/>
                 </StackPanel>
               </Border>
@@ -1950,6 +2229,16 @@ $XamlPrincipal = @'
               <ColumnDefinition Width="*"/><ColumnDefinition Width="14"/><ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
             <StackPanel Grid.Column="0">
+              <Border Style="{StaticResource Card}">
+                <StackPanel>
+                  <TextBlock Style="{StaticResource Titulo}" Text="DRIVERS"/>
+                  <TextBlock x:Name="txtModelo" Style="{StaticResource Dica}" Margin="0,0,0,10"/>
+                  <Button x:Name="btnDriversVerificar" Style="{StaticResource Botao}" Content="Verificar (lista dispositivos sem driver)"/>
+                  <Button x:Name="btnDriversInstalar" Style="{StaticResource Botao}" Content="Instalar drivers (fabricante + Windows Update)"/>
+                  <Button x:Name="btnDriverBooster" Style="{StaticResource Botao}" Content="Abrir o Driver Booster (revisão manual)"/>
+                  <CheckBox x:Name="chkDBDesinstalar" IsChecked="True" Content="Desinstalar o Driver Booster ao terminar"/>
+                </StackPanel>
+              </Border>
               <Border Style="{StaticResource Card}">
                 <StackPanel>
                   <TextBlock Style="{StaticResource Titulo}" Text="DIAGNÓSTICO E LIMPEZA"/>
@@ -2126,6 +2415,8 @@ $GuiScript = {
         $c.chkRede.IsChecked       = $pd.Rede
         $c.chkHibernacao.IsChecked = $pd.Hibernacao
         $c.chkRelatorio.IsChecked  = $pd.Relatorio
+        $c.chkDrivers.IsChecked    = $pd.Drivers
+        $c.txtModelo.Text = "Detectado: $($d.Modelo)`n$($d.FerramentaDrivers)"
         if (-not $d.Notebook) { $c.chkPlanoNotebook.Visibility = 'Collapsed' }
         $c.chkPlanoNotebook.IsEnabled = $false
 
@@ -2160,6 +2451,7 @@ $GuiScript = {
             $resumo = "Programas: $($ids.Count) selecionado(s)`nOffice: $($off.Content)"
             if ($c.chkDebloat.IsChecked)  { $resumo += "`nDebloat: sim" }
             if ($c.chkOtimizar.IsChecked) { $resumo += "`nOtimização avançada: sim" }
+            if ($c.chkDrivers.IsChecked)  { $resumo += "`nDrivers: sim" }
             if ($c.chkWU.IsChecked)       { $resumo += "`nDesativar Windows Update: sim" }
             $r = [System.Windows.MessageBox]::Show($janela, "Iniciar a instalação?`n`n$resumo", 'SetupPC', 'YesNo', 'Question')
             if ("$r" -ne 'Yes') { return }
@@ -2178,6 +2470,7 @@ $GuiScript = {
                 PlanoNotebook = [bool]$c.chkPlanoNotebook.IsChecked
                 DesativarWU   = [bool]$c.chkWU.IsChecked
                 Relatorio     = [bool]$c.chkRelatorio.IsChecked
+                Drivers       = [bool]$c.chkDrivers.IsChecked
             }
             $c.wpFinal.Visibility = 'Collapsed'
             $c.rtbLog.Document.Blocks.Clear()
@@ -2191,6 +2484,12 @@ $GuiScript = {
             if ("$r" -eq 'Yes') { Send-Comando 'Limpeza' }
         })
         $c.btnPasta.Add_Click({ Start-Process explorer.exe $d.PastaScript })
+        $c.btnDriversVerificar.Add_Click({ Send-Comando 'DriversVerificar' })
+        $c.btnDriversInstalar.Add_Click({
+            $r = [System.Windows.MessageBox]::Show($janela, "Procurar e instalar drivers agora?`n`nUsa a ferramenta oficial do fabricante (Dell, Lenovo ou HP) quando existir e depois o Windows Update. Pode levar vários minutos.", 'SetupPC', 'YesNo', 'Question')
+            if ("$r" -eq 'Yes') { Send-Comando 'DriversInstalar' }
+        })
+        $c.btnDriverBooster.Add_Click({ Send-Comando 'DriverBooster' @{ Desinstalar = [bool]$c.chkDBDesinstalar.IsChecked } })
         $c.btnOtimizar.Add_Click({
             $r = [System.Windows.MessageBox]::Show($janela, 'Aplicar a otimização avançada? Os valores originais ficam salvos e podem ser revertidos.', 'SetupPC', 'YesNo', 'Question')
             if ("$r" -eq 'Yes') { Send-Comando 'Otimizar' }
@@ -2220,7 +2519,7 @@ $GuiScript = {
             if ("$r" -eq 'Yes') { Send-Comando 'Reiniciar' }
         })
 
-        $botoes = @($c.btnIniciar, $c.btnRelatorioPC, $c.btnLimpeza, $c.btnOtimizar, $c.btnVBS, $c.btnReverter,
+        $botoes = @($c.btnIniciar, $c.btnDriversVerificar, $c.btnDriversInstalar, $c.btnDriverBooster, $c.btnRelatorioPC, $c.btnLimpeza, $c.btnOtimizar, $c.btnVBS, $c.btnReverter,
                     $c.btnWUDesativar, $c.btnWUReativar, $c.btnWUStatus, $c.btnAtivStatus, $c.btnAtivOEM,
                     $c.btnAtivWin, $c.btnAtivOffice, $c.btnReiniciar)
 
@@ -2254,7 +2553,10 @@ $GuiScript = {
                 $script:perguntando = $true
                 try {
                     $q = $sync.Pergunta
-                    if ($q.Tipo -eq 'SimNao') {
+                    if ($q.Tipo -eq 'Aviso') {
+                        [void][System.Windows.MessageBox]::Show($janela, $q.Texto, 'SetupPC', 'OK', 'Information')
+                        $resp = $true
+                    } elseif ($q.Tipo -eq 'SimNao') {
                         $r = [System.Windows.MessageBox]::Show($janela, $q.Texto, 'SetupPC', 'YesNo', 'Question')
                         $resp = ("$r" -eq 'Yes')
                     } else {
@@ -2308,6 +2610,7 @@ function Set-ConfigDaGui($Cfg) {
     if ($Cfg.PlanoNotebook) { $script:PlanoNotebook = 'S' } else { $script:PlanoNotebook = 'N' }
     $script:DesativarWindowsUpdate = [switch]$Cfg.DesativarWU
     $script:GerarRelatorioEntrega  = [bool]$Cfg.Relatorio
+    $script:InstalarDrivers        = [bool]$Cfg.Drivers
     if ($Cfg.Gamer) { $modo = 'Gamer' } else { $modo = 'Padrão' }
     if (-not $Cfg.Office) { $modo += ' sem Office' }
     $script:ModoNome = $modo
@@ -2326,6 +2629,7 @@ function Invoke-ComandoGui($Cmd) {
         WUReativar = 'Reativando o Windows Update'; WUStatus = 'Status do Windows Update'; AtivStatus = 'Status da ativação'
         AtivOEM = 'Ativando o Windows com a chave da BIOS'; AtivWin = 'Ativando o Windows'; AtivOffice = 'Ativando o Office'
         Instalar = 'Iniciando a instalação'; Reiniciar = 'Reiniciando'
+        DriversVerificar = 'Verificando drivers'; DriversInstalar = 'Instalando drivers'; DriverBooster = 'Driver Booster'
     }
     $s.Etapa = $nomes[$Cmd.Acao]
     try {
@@ -2333,6 +2637,9 @@ function Invoke-ComandoGui($Cmd) {
             'Instalar'    { Set-ConfigDaGui $Cmd.Config; Invoke-Instalacao; $s.ArquivoEntrega = $script:ArquivoEntrega }
             'RelatorioPC' { New-RelatorioPC }
             'Limpeza'     { Invoke-Limpeza }
+            'DriversVerificar' { [void](Show-DispositivosSemDriver) }
+            'DriversInstalar'  { Invoke-Drivers }
+            'DriverBooster'    { Invoke-DriverBooster ([bool]$Cmd.Config.Desinstalar) }
             'Otimizar'    { Invoke-Otimizacoes }
             'VBS'         { Disable-VBS }
             'Reverter'    { Undo-Otimizacoes }
@@ -2363,6 +2670,9 @@ function Start-Gui {
     $s.XamlEntrada = $XamlEntrada
     $s.Fechado = $false; $s.Aberta = $false; $s.Ocupado = $false
     $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
+    $fab = Get-Fabricante
+    $ferramenta = @{ Dell = 'Drivers via Dell Command Update + Windows Update'; Lenovo = 'Drivers via catálogo Lenovo + Windows Update'; HP = 'Drivers via HP Image Assistant + Windows Update' }[$fab.Marca]
+    if (-not $ferramenta) { $ferramenta = 'Sem ferramenta do fabricante: drivers via Windows Update' }
     $s.Dados = @{
         PC           = $env:COMPUTERNAME
         Windows      = "$($os.Caption)"
@@ -2373,9 +2683,12 @@ function Start-Gui {
         Opcionais    = @($ProgramasOpcionais | ForEach-Object { @{ Nome = $_.Nome; Id = $_.Id } })
         Office       = @($VersoesOffice.Keys | ForEach-Object { @{ Chave = $_; Nome = $VersoesOffice[$_].Nome } })
         OfficePadrao = $OfficePadrao
+        Modelo       = "$($fab.Fabricante) $($fab.Modelo)"
+        FerramentaDrivers = $ferramenta
         Padroes      = @{
             RemoverXbox = $RemoverXbox; RemoverOneDrive = $RemoverOneDrive; Icones = $IconesAreaTrabalho
             Rede = $ConfigurarRede; Hibernacao = $DesativarHibernacao; Relatorio = $GerarRelatorioEntrega
+            Drivers = $InstalarDrivers
         }
     }
 
@@ -2434,6 +2747,7 @@ if (-not $usarParametros) {
         if ($op -eq '5') { Invoke-MenuOtimizacao;    Show-Banner }
         if ($op -eq '6') { Invoke-MenuWindowsUpdate; Show-Banner }
         if ($op -eq '7') { Invoke-MenuAtivacao;      Show-Banner }
+        if ($op -eq '10') { Invoke-MenuDrivers;      Show-Banner }
         if ($op -in '8', '9') {
             if ($op -eq '8') { New-RelatorioPC } else { Invoke-Limpeza }
             Write-Host ''; Read-Host '   Enter para voltar ao menu' | Out-Null
