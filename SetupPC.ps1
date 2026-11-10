@@ -114,6 +114,7 @@ $MostrarExtensoes       = $true
 $AtualizarTudoNoFinal   = $false  # roda "winget upgrade --all" no final
 $UsarChocolatey         = $true   # se o winget não funcionar (ou falhar num programa), tenta pelo Chocolatey
 $PreferirChocolatey     = $false  # $true = usa o Chocolatey primeiro e o winget como reserva
+$RepararWinget          = $false  # $true = se o winget faltar, tenta registrar/baixar (mais lento) antes do Chocolatey
 
 # Apps pré-instalados que serão removidos (aceita curingas *).
 # O que NÃO está aqui não é tocado (Loja, Calculadora, Fotos, Bloco de Notas, Paint, etc.).
@@ -399,28 +400,43 @@ function Install-WingetOnline {
 }
 
 function Initialize-Winget {
+    # Só verifica uma vez por execução
+    if ($script:WingetVerificado) { return $script:WingetExe }
+    $script:WingetVerificado = $true
+    $script:WingetExe = $null
+
     Write-Etapa 'Verificando o winget'
     $exe = Get-WingetPath
+    if ($exe -and (Get-WingetVersao $exe) -ge [version]'1.7') {
+        Write-Ok "winget $(Get-WingetVersao $exe) pronto."
+        $script:WingetExe = $exe
+        return $exe
+    }
 
+    # Caminho rápido: sem winget (ou muito antigo) -> vai direto para o Chocolatey
+    if ($UsarChocolatey -and -not $RepararWinget) {
+        if ($exe) { Write-Aviso "winget $(Get-WingetVersao $exe) é antigo demais; usando o Chocolatey." }
+        else      { Write-Aviso 'winget não encontrado; usando o Chocolatey.' }
+        return $null
+    }
+
+    # Caminho lento (opcional): tenta registrar/baixar o winget
     if (-not $exe) {
         Write-Info 'winget não encontrado. Tentando registrar o App Installer...'
         try { Add-AppxPackage -RegisterByFamilyName -MainPackage Microsoft.DesktopAppInstaller_8wekyb3d8bbwe -ErrorAction Stop } catch {}
         for ($i = 0; $i -lt 12 -and -not $exe; $i++) { Start-Sleep -Seconds 5; $exe = Get-WingetPath }
     }
-
     if (-not $exe -or (Get-WingetVersao $exe) -lt [version]'1.7') {
         try { Install-WingetOnline } catch { Write-Erro "Falha ao baixar o winget: $($_.Exception.Message)" }
         Start-Sleep -Seconds 3
         $exe = Get-WingetPath
     }
-
     if (-not $exe) {
         Write-Erro 'winget indisponível. Verifique a internet ou atualize o "Instalador de Aplicativo" pela Microsoft Store.'
         return $null
     }
-
     Write-Ok "winget $(Get-WingetVersao $exe) pronto."
-    & $exe source update --disable-interactivity 2>&1 | Out-Null
+    $script:WingetExe = $exe
     return $exe
 }
 
@@ -436,7 +452,11 @@ function Install-ProgramaWinget($Winget, $P) {
                '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
     if ($P.Fonte) { $wargs += @('--source', $P.Fonte) } else { $wargs += @('--source', 'winget') }
 
-    for ($tentativa = 1; $tentativa -le 2; $tentativa++) {
+    # 2ª tentativa só quando faz sentido: sem o idioma pedido, ou quando não há Chocolatey de reserva
+    $maxTentativas = 1
+    if ($P.Locale -or -not ($UsarChocolatey -and $P.Choco)) { $maxTentativas = 2 }
+
+    for ($tentativa = 1; $tentativa -le $maxTentativas; $tentativa++) {
         $extra = @()
         # 1ª tentativa no idioma pedido; a 2ª sem idioma (caso não exista o instalador traduzido)
         if ($P.Locale -and $tentativa -eq 1) { $extra = @('--locale', $P.Locale) }
@@ -447,7 +467,7 @@ function Install-ProgramaWinget($Winget, $P) {
         if ($code -eq 0)                     { Write-Ok "$($P.Nome) instalado.";        return 'Instalado' }
         if ($WG_JA_INSTALADO -contains $code) { Write-Ok "$($P.Nome) já estava instalado."; return 'Já instalado' }
         if ($WG_REINICIAR -contains $code)    { Write-Ok "$($P.Nome) instalado (requer reinício)."; $script:PrecisaReiniciar = $true; return 'Instalado (reiniciar)' }
-        Start-Sleep -Seconds 3
+        if ($tentativa -lt $maxTentativas -and -not $P.Locale) { Start-Sleep -Seconds 3 }
     }
     Write-Erro "$($P.Nome) falhou (código $code)."
     return "FALHOU ($code)"
@@ -694,7 +714,6 @@ function Install-Programas {
     if ($PreferirChocolatey -and $UsarChocolatey) { $choco = Initialize-Choco }
     if (-not $choco) { $winget = Initialize-Winget }
     if (-not $winget -and -not $choco -and $UsarChocolatey) {
-        Write-Aviso 'winget indisponível neste PC: usando o Chocolatey.'
         $choco = Initialize-Choco
     }
 
@@ -2171,6 +2190,7 @@ function Invoke-Instalacao {
     $script:ArquivoEntrega = $null
     $script:ResultadoDrivers = $null
     $script:OfficeExistenteTxt = $null
+    $script:WingetVerificado = $false
     $script:DispositivosPendentes = $null
 
     # Conta as etapas para a barra de progresso
