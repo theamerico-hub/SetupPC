@@ -203,7 +203,6 @@ $AppsXbox = @(
 
 # ---------------- Configurações do sistema ----------------
 $IconesAreaTrabalho  = $true   # Este Computador, Lixeira, Painel de Controle e pasta do usuário
-$FixarChromeBarra    = $true   # fixa o Google Chrome na barra de tarefas depois de instalar
 $ConfigurarRede      = $true   # rede privada + descoberta de rede + compartilhamento de arquivos/impressoras
 $DesativarHibernacao = $true   # apaga o hiberfil.sys e libera espaço (só desktop; notebook mantém)
 
@@ -594,55 +593,6 @@ function Add-AtalhosOffice {
     }
 }
 
-# Fixa o Chrome na barra de tarefas pelo método oficial (layout da barra de tarefas).
-# PinListPlacement="Append" mantém os ícones que já estão lá e só acrescenta o Chrome.
-function Set-ChromeBarraTarefas {
-    $lnk = Join-Path $env:ProgramData 'Microsoft\Windows\Start Menu\Programs\Google Chrome.lnk'
-    if (-not (Test-Path $lnk)) { Write-Aviso 'Atalho do Chrome não encontrado; não foi possível fixar na barra de tarefas.'; return }
-
-    $xml = @'
-<?xml version="1.0" encoding="utf-8"?>
-<LayoutModificationTemplate
-    xmlns="http://schemas.microsoft.com/Start/2014/LayoutModification"
-    xmlns:defaultlayout="http://schemas.microsoft.com/Start/2014/FullDefaultLayout"
-    xmlns:start="http://schemas.microsoft.com/Start/2014/StartLayout"
-    xmlns:taskbar="http://schemas.microsoft.com/Start/2014/TaskbarLayout"
-    Version="1">
-  <CustomTaskbarLayoutCollection PinListPlacement="Append">
-    <defaultlayout:TaskbarLayout>
-      <taskbar:TaskbarPinList>
-        <taskbar:DesktopApp DesktopApplicationLinkPath="%ALLUSERSPROFILE%\Microsoft\Windows\Start Menu\Programs\Google Chrome.lnk" />
-      </taskbar:TaskbarPinList>
-    </defaultlayout:TaskbarLayout>
-  </CustomTaskbarLayoutCollection>
-</LayoutModificationTemplate>
-'@
-    try {
-        # 1) Usuário atual: política de layout da barra de tarefas
-        $pasta = Join-Path $env:ProgramData 'SetupPC'
-        New-Item -ItemType Directory -Path $pasta -Force | Out-Null
-        $arq = Join-Path $pasta 'BarraDeTarefas.xml'
-        [IO.File]::WriteAllText($arq, $xml, (New-Object System.Text.UTF8Encoding($false)))
-        $pol = 'HKCU:\Software\Policies\Microsoft\Windows\Explorer'
-        Set-Reg $pol 'StartLayoutFile' $arq 'ExpandString'
-        Set-Reg $pol 'LockedStartLayout' 1
-
-        # 2) Novos usuários: layout padrão do perfil Default
-        $shellDefault = "$env:SystemDrive\Users\Default\AppData\Local\Microsoft\Windows\Shell"
-        New-Item -ItemType Directory -Path $shellDefault -Force | Out-Null
-        [IO.File]::WriteAllText((Join-Path $shellDefault 'LayoutModification.xml'), $xml, (New-Object System.Text.UTF8Encoding($false)))
-
-        # Reinicia o Explorer para aplicar
-        Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
-        if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) { Start-Process explorer.exe }
-        Write-Ok 'Google Chrome fixado na barra de tarefas.'
-        Add-Acao 'Google Chrome fixado na barra de tarefas'
-    } catch {
-        Write-Aviso "Não foi possível fixar o Chrome na barra de tarefas: $($_.Exception.Message)"
-    }
-}
-
 function Install-Office($V) {
     if ($OfficePularSeInstalado) {
         $existente = @(Get-OfficeInstalado)
@@ -807,7 +757,6 @@ function Install-Programas {
         $choco = Initialize-Choco
     }
 
-    $chromeOk = $false
     foreach ($p in @(Get-ListaProgramas)) {
         Step-Progresso "Instalando $($p.Nome)"
         $status = 'FALHOU (sem instalador)'
@@ -825,9 +774,7 @@ function Install-Programas {
         }
         if ($status -like 'FALHOU*' -and -not $p.Choco -and -not $winget) { $status = 'FALHOU (só existe no winget)' }
         $Resultados.Add([pscustomobject]@{ Programa = $p.Nome; Status = $status })
-        if ($p.Id -eq 'Google.Chrome' -and $FixarChromeBarra -and $status -notlike 'FALHOU*') { $chromeOk = $true }
     }
-    if ($chromeOk) { Set-ChromeBarraTarefas }
     foreach ($i in $InstaladoresLocais) {
         Step-Progresso "Instalando $($i.Nome)"
         $status = Install-InstaladorLocal $i
@@ -2480,7 +2427,6 @@ $XamlPrincipal = @'
                   <CheckBox x:Name="chkIcones" Content="Ícones na Área de Trabalho (Este Computador, Lixeira...)"/>
                   <CheckBox x:Name="chkRede" Content="Rede privada, descoberta de rede e impressoras"/>
                   <CheckBox x:Name="chkHibernacao" Content="Desativar a hibernação (desktops)"/>
-                  <CheckBox x:Name="chkFixarChrome" Content="Fixar o Google Chrome na barra de tarefas"/>
                   <CheckBox x:Name="chkAtalhosOffice" Content="Atalhos do Word, Excel e PowerPoint na Área de Trabalho"/>
                 </StackPanel>
               </Border>
@@ -2703,7 +2649,6 @@ $GuiScript = {
         $c.chkIcones.IsChecked     = $pd.Icones
         $c.chkRede.IsChecked       = $pd.Rede
         $c.chkHibernacao.IsChecked = $pd.Hibernacao
-        $c.chkFixarChrome.IsChecked = $pd.FixarChrome
         $c.chkAtalhosOffice.IsChecked = $pd.AtalhosOffice
         $c.chkRelatorio.IsChecked  = $pd.Relatorio
         $c.chkDrivers.IsChecked    = $pd.Drivers
@@ -2757,7 +2702,6 @@ $GuiScript = {
                 Icones        = [bool]$c.chkIcones.IsChecked
                 Rede          = [bool]$c.chkRede.IsChecked
                 Hibernacao    = [bool]$c.chkHibernacao.IsChecked
-                FixarChrome   = [bool]$c.chkFixarChrome.IsChecked
                 AtalhosOffice = [bool]$c.chkAtalhosOffice.IsChecked
                 Otimizar      = [bool]$c.chkOtimizar.IsChecked
                 PlanoNotebook = [bool]$c.chkPlanoNotebook.IsChecked
@@ -2899,7 +2843,6 @@ function Set-ConfigDaGui($Cfg) {
     $script:IconesAreaTrabalho  = [bool]$Cfg.Icones
     $script:ConfigurarRede      = [bool]$Cfg.Rede
     $script:DesativarHibernacao = [bool]$Cfg.Hibernacao
-    $script:FixarChromeBarra    = [bool]$Cfg.FixarChrome
     $script:AtalhosOffice       = [bool]$Cfg.AtalhosOffice
     $script:Otimizar            = [switch]$Cfg.Otimizar
     if ($Cfg.PlanoNotebook) { $script:PlanoNotebook = 'S' } else { $script:PlanoNotebook = 'N' }
@@ -2984,7 +2927,7 @@ function Start-Gui {
         Padroes      = @{
             RemoverXbox = $RemoverXbox; RemoverOneDrive = $RemoverOneDrive; Icones = $IconesAreaTrabalho
             Rede = $ConfigurarRede; Hibernacao = $DesativarHibernacao; Relatorio = $GerarRelatorioEntrega
-            Drivers = $InstalarDrivers; FixarChrome = $FixarChromeBarra; AtalhosOffice = $AtalhosOffice
+            Drivers = $InstalarDrivers; AtalhosOffice = $AtalhosOffice
         }
     }
 
