@@ -1956,8 +1956,44 @@ function Remove-DriverBooster {
     else { Write-Ok 'Driver Booster desinstalado.' }
 }
 
+# Programas instalados (lidos do registro), para detectar "brindes" instalados junto
+function Get-ProgramasInstalados {
+    $chaves = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+              'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+              'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    return @(Get-ItemProperty -Path $chaves -ErrorAction SilentlyContinue |
+        Where-Object { $_.DisplayName } |
+        Select-Object PSChildName, DisplayName, Publisher, UninstallString, QuietUninstallString)
+}
+
+# Remove qualquer programa da IObit/iTop que apareceu depois de $Antes (menos o próprio Driver Booster)
+function Remove-ExtrasIObit([object[]]$Antes) {
+    $idsAntes = @($Antes | ForEach-Object { $_.PSChildName })
+    $extras = @(Get-ProgramasInstalados | Where-Object {
+        $idsAntes -notcontains $_.PSChildName -and
+        ("$($_.Publisher) $($_.DisplayName)" -match 'IObit|iTop|Advanced SystemCare|Smart Defrag|Malware Fighter|Software Updater') -and
+        $_.DisplayName -notmatch 'Driver Booster'
+    })
+    if ($extras.Count -eq 0) { Write-Ok 'Nenhum programa extra da IObit/iTop foi instalado junto.'; return }
+
+    foreach ($x in $extras) {
+        Write-Aviso "Programa extra detectado: $($x.DisplayName). Removendo..."
+        $cmd = $x.QuietUninstallString
+        if (-not $cmd) { $cmd = $x.UninstallString }
+        if ($cmd -match '^\s*"([^"]+)"\s*(.*)$') { $exe = $Matches[1]; $args0 = $Matches[2] }
+        elseif ($cmd -match '^\s*(\S+)\s*(.*)$') { $exe = $Matches[1]; $args0 = $Matches[2] }
+        else { continue }
+        if (-not $x.QuietUninstallString) { $args0 = "$args0 /VERYSILENT /SUPPRESSMSGBOXES /NORESTART".Trim() }
+        Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path -like "$(Split-Path $exe)*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+        try { Start-Process -FilePath $exe -ArgumentList $args0 -Wait -ErrorAction Stop } catch { Write-Aviso "Não foi possível remover $($x.DisplayName); desinstale pelo Painel de Controle." ; continue }
+        Write-Ok "Removido: $($x.DisplayName)"
+        Add-Acao "Removido programa extra instalado pela IObit: $($x.DisplayName)"
+    }
+}
+
 function Invoke-DriverBooster([bool]$Desinstalar) {
     Write-Etapa 'Driver Booster'
+    $antes = Get-ProgramasInstalados   # "foto" dos programas antes de mexer
     $exe = Get-DriverBoosterExe
     if (-not $exe) {
         Write-Info 'Instalando o Driver Booster (silencioso)...'
@@ -1966,11 +2002,18 @@ function Invoke-DriverBooster([bool]$Desinstalar) {
     }
     if (-not $exe) { Write-Erro 'Não foi possível instalar o Driver Booster.'; return }
 
+    # 1ª checagem: brindes instalados junto com o instalador
+    Remove-ExtrasIObit $antes
+
     Write-Info 'Abrindo o Driver Booster. Ele faz a busca sozinho; confira a lista e clique em "Atualizar agora".'
     Start-Process $exe.FullName
-    Show-AvisoUsuario "O Driver Booster foi aberto.`n`n1. Espere a busca terminar.`n2. Confira a lista e clique em ""Atualizar agora"".`n3. Quando os drivers terminarem de instalar, volte aqui e clique em OK."
+    Show-AvisoUsuario "O Driver Booster foi aberto.`n`n1. Espere a busca terminar.`n2. Confira a lista e clique em ""Atualizar agora"".`n3. Se ele oferecer outros programas (Advanced SystemCare, iTop etc.), recuse.`n4. Quando os drivers terminarem de instalar, volte aqui e clique em OK."
     Add-Acao 'Drivers revisados com o Driver Booster'
+
     if ($Desinstalar) { Remove-DriverBooster }
+    # 2ª checagem: algo oferecido dentro do programa durante o uso
+    Remove-ExtrasIObit $antes
+
     $sem = @(Get-DispositivosSemDriver)
     if ($sem.Count -eq 0) { Write-Ok 'Todos os dispositivos estão com driver.' }
     else { Write-Aviso "$($sem.Count) dispositivo(s) ainda com pendência." }
