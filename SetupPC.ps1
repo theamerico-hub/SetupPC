@@ -209,7 +209,7 @@ $LimpezaProfunda = $true       # inclui limpeza de componentes antigos do Window
 
 # ---------------- Relatórios ----------------
 $GerarRelatorioEntrega         = $true   # relatório HTML do serviço ao fim da instalação
-$InstalarDrivers               = $true   # drivers do fabricante (Dell/Lenovo/HP) + Windows Update na instalação
+$InstalarDrivers               = $true   # drivers pela ferramenta do fabricante (Dell/Lenovo/HP) na instalação
 $CopiarEntregaParaAreaTrabalho = $true   # deixa uma cópia na Área de Trabalho para o cliente
 $NomeTecnico    = 'Danilo Américo'
 $ContatoTecnico = ''                     # ex.: 'WhatsApp (81) 9xxxx-xxxx' - aparece nos relatórios
@@ -1922,7 +1922,7 @@ function Show-DispositivosSemDriver {
         'Dell'   { Write-Info 'Ferramenta do fabricante disponível: Dell Command Update' }
         'Lenovo' { Write-Info 'Ferramenta do fabricante disponível: catálogo oficial da Lenovo (LSUClient)' }
         'HP'     { Write-Info 'Ferramenta do fabricante disponível: HP Image Assistant' }
-        default  { Write-Info 'Sem ferramenta automática do fabricante: os drivers virão do Windows Update.' }
+        default  { Write-Info 'Sem ferramenta automática do fabricante: use o Driver Booster, se precisar.' }
     }
     $sem = @(Get-DispositivosSemDriver)
     if ($sem.Count -eq 0) {
@@ -2029,39 +2029,7 @@ function Install-DriversHP {
     }
 }
 
-# --- Qualquer marca: drivers pelo Windows Update ---
-function Install-DriversWindowsUpdate {
-    Write-Info 'Procurando drivers no Windows Update...'
-    try {
-        $sessao = New-Object -ComObject Microsoft.Update.Session
-        $sessao.ClientApplicationID = 'SetupPC'
-        $busca  = $sessao.CreateUpdateSearcher()
-        $res    = $busca.Search("IsInstalled=0 and Type='Driver' and IsHidden=0")
-        if ($res.Updates.Count -eq 0) { Write-Ok 'Windows Update: nenhum driver pendente.'; return 'Nenhum driver pendente' }
-
-        $lista = New-Object -ComObject Microsoft.Update.UpdateColl
-        foreach ($u in $res.Updates) {
-            if (-not $u.EulaAccepted) { $u.AcceptEula() }
-            Write-Info "  - $($u.Title)"
-            [void]$lista.Add($u)
-        }
-        Write-Info "Baixando $($lista.Count) driver(s)..."
-        $down = $sessao.CreateUpdateDownloader(); $down.Updates = $lista; [void]$down.Download()
-        Write-Info 'Instalando...'
-        $inst = $sessao.CreateUpdateInstaller(); $inst.Updates = $lista
-        $r = $inst.Install()
-        $ok = 0
-        for ($i = 0; $i -lt $lista.Count; $i++) { if ($r.GetUpdateResult($i).ResultCode -in 2, 3) { $ok++ } }
-        if ($r.RebootRequired) { $script:PrecisaReiniciar = $true }
-        Write-Ok "Windows Update: $ok de $($lista.Count) driver(s) instalado(s)."
-        return "$ok de $($lista.Count) driver(s) instalado(s)"
-    } catch {
-        Write-Aviso "Não foi possível usar o Windows Update: $($_.Exception.Message)"
-        return 'Windows Update indisponível'
-    }
-}
-
-# Fluxo completo: fabricante + Windows Update + verificação final
+# Fluxo completo: ferramenta do fabricante + verificação final
 function Invoke-Drivers {
     Write-Etapa 'Drivers'
     $f = Get-Fabricante
@@ -2074,18 +2042,21 @@ function Invoke-Drivers {
         'Dell'   { $script:ResultadoDrivers.Add([pscustomobject]@{ 'Origem' = 'Dell Command Update'; 'Status' = (Install-DriversDell) }) }
         'Lenovo' { $script:ResultadoDrivers.Add([pscustomobject]@{ 'Origem' = 'Catálogo Lenovo';     'Status' = (Install-DriversLenovo) }) }
         'HP'     { $script:ResultadoDrivers.Add([pscustomobject]@{ 'Origem' = 'HP Image Assistant';  'Status' = (Install-DriversHP) }) }
+        default  {
+            Write-Aviso "$($f.Fabricante) não tem ferramenta automática de drivers. Use o Driver Booster em Ferramentas, se precisar."
+            $script:ResultadoDrivers.Add([pscustomobject]@{ 'Origem' = 'Fabricante'; 'Status' = 'Sem ferramenta automática (usar Driver Booster)' })
+        }
     }
-    $script:ResultadoDrivers.Add([pscustomobject]@{ 'Origem' = 'Windows Update'; 'Status' = (Install-DriversWindowsUpdate) })
 
     $depois = @(Get-DispositivosSemDriver)
     $script:DispositivosPendentes = $depois
     if ($depois.Count -eq 0) {
         Write-Ok 'Todos os dispositivos estão com driver.'
-        Add-Acao 'Drivers instalados e atualizados (todos os dispositivos com driver)'
+        Add-Acao 'Drivers verificados (todos os dispositivos com driver)'
     } else {
         Write-Aviso "$($depois.Count) dispositivo(s) ainda sem driver ou com erro. Tente o Driver Booster em Ferramentas."
         foreach ($d in $depois) { Write-Host "         - $($d.Dispositivo)  ($($d.Problema))" -ForegroundColor Yellow }
-        Add-Acao "Drivers instalados e atualizados ($($depois.Count) dispositivo(s) ainda com pendência)"
+        Add-Acao "Drivers verificados ($($depois.Count) dispositivo(s) ainda com pendência)"
     }
 }
 
@@ -2174,7 +2145,7 @@ function Invoke-MenuDrivers {
     do {
         Write-Etapa 'Drivers'
         Write-Host '   [1]  Verificar (lista dispositivos sem driver)'
-        Write-Host '   [2]  Instalar drivers (fabricante + Windows Update)'
+        Write-Host '   [2]  Instalar drivers do fabricante (Dell, Lenovo, HP)'
         Write-Host '   [3]  Abrir o Driver Booster (e desinstalar ao terminar)'
         Write-Host '   [4]  Abrir o Driver Booster (e manter instalado)'
         Write-Host '   [0]  Voltar'
@@ -2219,7 +2190,7 @@ function Invoke-Instalacao {
 
     if (-not $SemPontoRestauracao) { Step-Progresso 'Criando ponto de restauração'; New-PontoRestauracao }
     if (-not $SemProgramas)        { Install-Programas }
-    if ($InstalarDrivers)          { Step-Progresso 'Instalando drivers (fabricante + Windows Update)'; Invoke-Drivers }
+    if ($InstalarDrivers)          { Step-Progresso 'Instalando drivers do fabricante'; Invoke-Drivers }
     Step-Progresso 'Configurações do sistema'
     Invoke-ConfiguracoesSistema
     if (-not $SemDebloat)          { Step-Progresso 'Debloat: removendo apps e desativando telemetria'; Invoke-Debloat }
@@ -2409,7 +2380,7 @@ $XamlPrincipal = @'
               <Border Style="{StaticResource Card}">
                 <StackPanel>
                   <TextBlock Style="{StaticResource Titulo}" Text="DRIVERS E RELATÓRIO"/>
-                  <CheckBox x:Name="chkDrivers" Content="Instalar drivers (fabricante + Windows Update)"/>
+                  <CheckBox x:Name="chkDrivers" Content="Instalar drivers do fabricante (Dell, Lenovo, HP)"/>
                   <CheckBox x:Name="chkRelatorio" Content="Gerar relatório de entrega para o cliente"/>
                 </StackPanel>
               </Border>
@@ -2432,7 +2403,7 @@ $XamlPrincipal = @'
                   <TextBlock Style="{StaticResource Titulo}" Text="DRIVERS"/>
                   <TextBlock x:Name="txtModelo" Style="{StaticResource Dica}" Margin="0,0,0,10"/>
                   <Button x:Name="btnDriversVerificar" Style="{StaticResource Botao}" Content="Verificar (lista dispositivos sem driver)"/>
-                  <Button x:Name="btnDriversInstalar" Style="{StaticResource Botao}" Content="Instalar drivers (fabricante + Windows Update)"/>
+                  <Button x:Name="btnDriversInstalar" Style="{StaticResource Botao}" Content="Instalar drivers do fabricante (Dell, Lenovo, HP)"/>
                   <Button x:Name="btnDriverBooster" Style="{StaticResource Botao}" Content="Abrir o Driver Booster (revisão manual)"/>
                   <CheckBox x:Name="chkDBDesinstalar" IsChecked="True" Content="Desinstalar o Driver Booster ao terminar"/>
                 </StackPanel>
@@ -2689,7 +2660,7 @@ $GuiScript = {
         $c.btnPasta.Add_Click({ Start-Process explorer.exe $d.PastaScript })
         $c.btnDriversVerificar.Add_Click({ Send-Comando 'DriversVerificar' })
         $c.btnDriversInstalar.Add_Click({
-            $r = [System.Windows.MessageBox]::Show($janela, "Procurar e instalar drivers agora?`n`nUsa a ferramenta oficial do fabricante (Dell, Lenovo ou HP) quando existir e depois o Windows Update. Pode levar vários minutos.", 'SetupPC', 'YesNo', 'Question')
+            $r = [System.Windows.MessageBox]::Show($janela, "Procurar e instalar drivers agora?`n`nUsa a ferramenta oficial do fabricante (Dell, Lenovo ou HP). Pode levar vários minutos.", 'SetupPC', 'YesNo', 'Question')
             if ("$r" -eq 'Yes') { Send-Comando 'DriversInstalar' }
         })
         $c.btnDriverBooster.Add_Click({ Send-Comando 'DriverBooster' @{ Desinstalar = [bool]$c.chkDBDesinstalar.IsChecked } })
@@ -2874,8 +2845,8 @@ function Start-Gui {
     $s.Fechado = $false; $s.Aberta = $false; $s.Ocupado = $false
     $os = Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue
     $fab = Get-Fabricante
-    $ferramenta = @{ Dell = 'Drivers via Dell Command Update + Windows Update'; Lenovo = 'Drivers via catálogo Lenovo + Windows Update'; HP = 'Drivers via HP Image Assistant + Windows Update' }[$fab.Marca]
-    if (-not $ferramenta) { $ferramenta = 'Sem ferramenta do fabricante: drivers via Windows Update' }
+    $ferramenta = @{ Dell = 'Drivers via Dell Command Update'; Lenovo = 'Drivers via catálogo oficial da Lenovo'; HP = 'Drivers via HP Image Assistant' }[$fab.Marca]
+    if (-not $ferramenta) { $ferramenta = 'Sem ferramenta do fabricante: use o Driver Booster abaixo' }
     $s.Dados = @{
         PC           = $env:COMPUTERNAME
         Windows      = "$($os.Caption)"
