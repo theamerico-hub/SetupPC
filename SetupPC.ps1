@@ -94,6 +94,7 @@ $OfficeMostrarJanela = $true  # mostra a janela de progresso do Office
 # Apps que NÃO serão instalados junto com o Office.
 # Possíveis: Access, Excel, Groove, Lync, OneDrive, OneNote, Outlook, PowerPoint, Publisher, Teams, Word, Bing
 $OfficeExcluirApps = @('Groove', 'Lync', 'Teams', 'Bing')
+$OfficePularSeInstalado = $true   # se já existir algum Office no PC, NÃO instala por cima
 
 # Instaladores que você tem no pendrive (antivírus, drivers, sistemas próprios...).
 # Caminho relativo à pasta do script. .exe usa os argumentos informados;
@@ -476,8 +477,39 @@ function Install-InstaladorLocal($I) {
     }
 }
 
+# Office já instalado? (Click-to-Run: 365/2016-2024; e versões antigas MSI)
+function Get-OfficeInstalado {
+    $nomes = New-Object System.Collections.Generic.List[string]
+    $chaves = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
+              'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    Get-ItemProperty -Path $chaves -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.DisplayName -match '^(Microsoft Office|Microsoft 365|Office 16)' -and
+            $_.DisplayName -notmatch 'Click-to-Run|Extensib|Language|Idioma|Proofing|Revis|Shared|Compartilh|Viewer|Web Components|Connector|Validation|Componente|Component' -and
+            -not $_.SystemComponent
+        } |
+        ForEach-Object { if (-not $nomes.Contains($_.DisplayName)) { $nomes.Add($_.DisplayName) } }
+
+    # Click-to-Run sem entrada amigável: usa os IDs dos produtos
+    if ($nomes.Count -eq 0) {
+        $c2r = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Office\ClickToRun\Configuration' -ErrorAction SilentlyContinue
+        if ($c2r.ProductReleaseIds) {
+            foreach ($id in ($c2r.ProductReleaseIds -split ',')) { if ($id.Trim()) { $nomes.Add("$($id.Trim()) (Click-to-Run)") } }
+        }
+    }
+    return @($nomes)
+}
+
 function Select-Office {
     if ($SemProgramas) { return $null }
+    if ($Office -ne '0' -and $OfficePularSeInstalado) {
+        $existente = @(Get-OfficeInstalado)
+        if ($existente.Count -gt 0) {
+            Write-Aviso "Office já instalado neste PC: $($existente -join ', ')"
+            Write-Aviso 'A instalação do Office será pulada para não instalar por cima.'
+            return @{ Nome = 'Microsoft Office'; Pular = $true }
+        }
+    }
     $escolha = $Office
     if (-not $escolha -and $Silencioso) { $escolha = $OfficePadrao }
 
@@ -503,6 +535,18 @@ function Select-Office {
 }
 
 function Install-Office($V) {
+    if ($OfficePularSeInstalado) {
+        $existente = @(Get-OfficeInstalado)
+        if ($existente.Count -gt 0) {
+            $script:OfficeExistenteTxt = $existente -join ', '
+            Write-Etapa 'Microsoft Office'
+            Write-Aviso "Office já instalado: $($script:OfficeExistenteTxt)"
+            Write-Ok 'Instalação do Office pulada (não instala por cima).'
+            Add-Acao "Office já existente mantido ($($script:OfficeExistenteTxt)); instalação pulada"
+            return 'Já instalado (mantido)'
+        }
+    }
+    if ($V.Pular) { return 'Pulado' }
     Write-Etapa "Instalando $($V.Nome) ($OfficeIdioma, $OfficeArquitetura bits)"
     $pasta = Join-Path $env:TEMP 'SetupPC_Office'
     New-Item -ItemType Directory -Path $pasta -Force | Out-Null
@@ -1786,6 +1830,7 @@ function New-RelatorioEntrega([TimeSpan]$Duracao) {
 
     $officeTxt = 'Não instalado'
     if ($script:OfficeEscolhido) { $officeTxt = $script:OfficeEscolhido.Nome }
+    if ($script:OfficeExistenteTxt) { $officeTxt = "Já instalado: $($script:OfficeExistenteTxt)" }
     $secoes['Serviço realizado'] = [ordered]@{
         'Data'               = (Get-Date -Format 'dd/MM/yyyy HH:mm')
         'Técnico'            = $NomeTecnico
@@ -1805,7 +1850,7 @@ function New-RelatorioEntrega([TimeSpan]$Duracao) {
 
     $recs = New-Object System.Collections.Generic.List[string]
     $recs.Add('Reinicie o computador para concluir todas as configurações.')
-    if ($script:OfficeEscolhido) {
+    if ($script:OfficeEscolhido -and -not $script:OfficeExistenteTxt) {
         $recs.Add('Ative o Microsoft Office com a sua chave de licença ou entrando com a sua conta Microsoft no Word.')
     }
     if ((Get-ItemProperty "$WU_POL\AU" -ErrorAction SilentlyContinue).NoAutoUpdate -eq 1) {
@@ -2154,6 +2199,7 @@ function Invoke-Instalacao {
     $script:Acoes.Clear()
     $script:ArquivoEntrega = $null
     $script:ResultadoDrivers = $null
+    $script:OfficeExistenteTxt = $null
     $script:DispositivosPendentes = $null
 
     # Conta as etapas para a barra de progresso
@@ -2316,6 +2362,9 @@ $XamlPrincipal = @'
                 <StackPanel>
                   <TextBlock Style="{StaticResource Titulo}" Text="MICROSOFT OFFICE"/>
                   <ComboBox x:Name="cbOffice" Padding="8,6"/>
+                  <Border x:Name="bdOfficeExistente" Background="#FFF3D6" CornerRadius="6" Padding="10,8" Margin="0,8,0,0" Visibility="Collapsed">
+                    <TextBlock x:Name="txtOfficeExistente" TextWrapping="Wrap" Foreground="#8A5A00" FontSize="12"/>
+                  </Border>
                   <TextBlock Style="{StaticResource Dica}" Text="Em português do Brasil, baixado direto da Microsoft. Precisa de licença (chave ou conta Microsoft) para ativar."/>
                 </StackPanel>
               </Border>
@@ -2551,6 +2600,11 @@ $GuiScript = {
             if ($o.Chave -eq $d.OfficePadrao) { $c.cbOffice.SelectedItem = $item }
         }
         if ($c.cbOffice.SelectedIndex -lt 0) { $c.cbOffice.SelectedIndex = 0 }
+        if ($d.OfficeInstalado) {
+            $c.txtOfficeExistente.Text = "Office já instalado neste PC: $($d.OfficeInstalado). Ele será mantido e a instalação do Office será pulada."
+            $c.bdOfficeExistente.Visibility = 'Visible'
+            $c.cbOffice.SelectedIndex = 0   # "Não instalar o Office"
+        }
 
         $checksGamer = @()
         foreach ($p in $d.Programas)  { [void](New-Check $c.spProgramas $p $true) }
@@ -2832,6 +2886,7 @@ function Start-Gui {
         Opcionais    = @($ProgramasOpcionais | ForEach-Object { @{ Nome = $_.Nome; Id = $_.Id } })
         Office       = @($VersoesOffice.Keys | ForEach-Object { @{ Chave = $_; Nome = $VersoesOffice[$_].Nome } })
         OfficePadrao = $OfficePadrao
+        OfficeInstalado = $(if ($OfficePularSeInstalado) { (@(Get-OfficeInstalado) -join ', ') } else { '' })
         Modelo       = "$($fab.Fabricante) $($fab.Modelo)"
         FerramentaDrivers = $ferramenta
         Padroes      = @{
